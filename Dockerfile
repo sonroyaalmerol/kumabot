@@ -17,6 +17,7 @@ RUN apt-get update && \
       ca-certificates \
       curl \
       tzdata \
+      ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 10001 kumabot

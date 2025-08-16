@@ -32,11 +32,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	slog.Info("installing dependencies", "ytdlp", "ffmpeg")
+	slog.Info("installing dependencies", "ytdlp", true)
 
 	ytdlp.MustInstall(ctx, nil)
-	ytdlp.MustInstallFFprobe(ctx, nil)
-	ytdlp.MustInstallFFmpeg(ctx, nil)
 
 	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)
