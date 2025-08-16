@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/golang-migrate/migrate/v4 v4.18.3
+	github.com/pion/opus v0.0.0-20250618074346-646586bb17bf
 	github.com/zmb3/spotify/v2 v2.4.3
 	golang.org/x/oauth2 v0.18.0
 	modernc.org/sqlite v1.18.1

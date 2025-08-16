@@ -3,6 +3,7 @@ package player
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -217,6 +218,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 
 		if err != nil {
 			// Move to next track, or schedule idle
+			slog.Error("send opus stream", "song", song.Title, "err", err)
 			_ = p.Forward(ctx, s, 1)
 			return
 		}
