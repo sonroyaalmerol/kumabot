@@ -14,15 +14,10 @@ FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ffmpeg \
       ca-certificates \
       curl \
       tzdata \
     && rm -rf /var/lib/apt/lists/*
-
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp && \
-    chmod +x /usr/local/bin/yt-dlp && \
-    /usr/local/bin/yt-dlp --version
 
 RUN useradd -m -u 10001 kumabot
 USER kumabot
@@ -33,8 +28,6 @@ RUN mkdir -p /app/data /app/data/cache /app/data/cache/tmp
 
 COPY --from=builder /out/kumabot /usr/local/bin/kumabot
 
-ENV FFMPEG_PATH=/usr/bin/ffmpeg \
-    YTDLP_PATH=/usr/local/bin/yt-dlp \
-    REGISTER_COMMANDS_ON_BOT=false
+ENV REGISTER_COMMANDS_ON_BOT=false
 
 ENTRYPOINT ["/usr/local/bin/kumabot"]

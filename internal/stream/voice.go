@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	ffmpeg "github.com/u2takey/ffmpeg-go"
+
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -20,49 +22,79 @@ type OpusStreamer struct {
 	cancel context.CancelFunc
 }
 
-func StartOpusStream(ctx context.Context, ffmpegPath, inputURL string, seek, to *int, volumeDB *string) (*OpusStreamer, error) {
+func StartOpusStream(
+	ctx context.Context,
+	inputURL string,
+	seek, to *int,
+	volumeDB *string,
+) (*OpusStreamer, error) {
 	ctx2, cancel := context.WithCancel(ctx)
 
-	args := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-		"-i", inputURL,
-		"-vn",
-		"-ac", "2",
-		"-ar", "48000",
-	}
-	if seek != nil {
-		args = append(args, "-ss", fmt.Sprint(*seek))
-	}
-	if to != nil {
-		args = append(args, "-to", fmt.Sprint(*to))
-	}
-	if volumeDB != nil && *volumeDB != "" {
-		args = append(args, "-filter:a", "volume="+*volumeDB)
-	}
-	args = append(args,
-		"-c:a", "libopus",
-		"-b:a", "160k",
-		"-frame_duration", "20",
-		"-application", "audio",
-		"-f", "opus",
-		"pipe:1",
+	// Build input with reconnect options
+	in := ffmpeg.Input(
+		inputURL,
+		ffmpeg.KwArgs{
+			"reconnect":           "1",
+			"reconnect_streamed":  "1",
+			"reconnect_delay_max": "5",
+		},
 	)
 
-	cmd := exec.CommandContext(ctx2, ffmpegPath, args...)
+	// Start with audio stream; insert volume if requested
+	stream := in.Audio()
+
+	// Output options to match your original CLI
+	outKw := ffmpeg.KwArgs{
+		"vn":             "",        // -vn
+		"ac":             "2",       // -ac 2
+		"ar":             "48000",   // -ar 48000
+		"c:a":            "libopus", // -c:a libopus
+		"b:a":            "160k",    // -b:a 160k
+		"frame_duration": "20",      // -frame_duration 20
+		"application":    "audio",   // -application audio
+		"f":              "opus",    // -f opus
+	}
+
+	// Accurate seek (after -i): put ss/to on output side
+	if seek != nil {
+		outKw["ss"] = fmt.Sprint(*seek)
+	}
+	if to != nil {
+		outKw["to"] = fmt.Sprint(*to)
+	}
+
+	// Build graph to write to stdout
+	node := stream.
+		Output("pipe:", outKw).
+		GlobalArgs("-hide_banner", "-loglevel", "error")
+
+	// Compile to *exec.Cmd and hook up pipes
+	cmd := node.Compile()
+	// tie to our context by killing process on cancel
+	go func() {
+		<-ctx2.Done()
+		_ = cmd.Process.Kill()
+	}()
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("ffmpeg stdout: %w", err)
 	}
-	stderr := &bytes.Buffer{}
-	cmd.Stderr = stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("ffmpeg start: %w (stderr: %s)", err, stderr.String())
 	}
-	return &OpusStreamer{cmd: cmd, stdout: stdout, stderr: stderr, cancel: cancel}, nil
+
+	return &OpusStreamer{
+		cmd:    cmd,
+		stdout: stdout,
+		stderr: &stderr,
+		cancel: cancel,
+	}, nil
 }
 
 func (s *OpusStreamer) Close() {

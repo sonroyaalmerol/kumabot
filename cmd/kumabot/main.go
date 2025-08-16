@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/lrstanley/go-ytdlp"
 	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	"github.com/sonroyaalmerol/kumabot/internal/handlers"
@@ -29,6 +30,10 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	ytdlp.MustInstall(ctx, nil)
+	ytdlp.MustInstallFFprobe(ctx, nil)
+	ytdlp.MustInstallFFmpeg(ctx, nil)
 
 	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)

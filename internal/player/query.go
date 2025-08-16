@@ -102,7 +102,7 @@ func ResolveQueryToSongs(ctx context.Context, cfg *config.Config, query string, 
 		// YouTube?
 		if strings.Contains(q, "youtube.com") || strings.Contains(q, "youtu.be") || strings.Contains(q, "music.youtube.") {
 			if strings.Contains(q, "list=") {
-				infos, err := stream.YtdlpPlaylist(ctx, cfg.YoutubeDLPath, q)
+				infos, err := stream.YtdlpPlaylist(ctx, q)
 				if err != nil || len(infos) == 0 {
 					return nil, "", fmt.Errorf("not found")
 				}
@@ -121,7 +121,7 @@ func ResolveQueryToSongs(ctx context.Context, cfg *config.Config, query string, 
 				}
 				return out, extra, nil
 			}
-			info, err := stream.YtdlpGetInfo(ctx, cfg.YoutubeDLPath, q)
+			info, err := stream.YtdlpGetInfo(ctx, q)
 			if err != nil {
 				return nil, "", err
 			}
@@ -147,7 +147,7 @@ func ResolveQueryToSongs(ctx context.Context, cfg *config.Config, query string, 
 	}
 
 	// Not a URL or URI => YouTube search
-	info, err := stream.YtdlpGetInfo(ctx, cfg.YoutubeDLPath, "ytsearch1:"+q)
+	info, err := stream.YtdlpGetInfo(ctx, "ytsearch1:"+q)
 	if err != nil {
 		return nil, "", err
 	}
@@ -198,7 +198,7 @@ func spotifyTracksToYouTube(
 
 	for _, t := range tracks {
 		q := fmt.Sprintf(`ytsearch1:"%s" "%s"`, t.Name, t.Artist)
-		info, err := stream.YtdlpGetInfo(ctx, cfg.YoutubeDLPath, q)
+		info, err := stream.YtdlpGetInfo(ctx, q)
 		if err != nil || info == nil {
 			notFound++
 			continue

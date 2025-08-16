@@ -183,7 +183,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		if !strings.HasPrefix(ytURL, "http") {
 			ytURL = "https://www.youtube.com/watch?v=" + cur.URL
 		}
-		info, err := stream.YtdlpGetInfo(ctx, p.cfg.YoutubeDLPath, ytURL)
+		info, err := stream.YtdlpGetInfo(ctx, ytURL)
 		if err != nil {
 			return err
 		}
@@ -194,7 +194,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	}
 
 	// Start ffmpeg -> opus
-	streamer, err := stream.StartOpusStream(ctx, p.cfg.FFmpegPath, inputURL, seek, to, volumeAdj)
+	streamer, err := stream.StartOpusStream(ctx, inputURL, seek, to, volumeAdj)
 	if err != nil {
 		return err
 	}

@@ -32,8 +32,6 @@ func LoadConfig() (*Config, error) {
 		DiscordToken:        os.Getenv("DISCORD_TOKEN"),
 		SpotifyClientID:     os.Getenv("SPOTIFY_CLIENT_ID"),
 		SpotifyClientSecret: os.Getenv("SPOTIFY_CLIENT_SECRET"),
-		YoutubeDLPath:       getenv("YTDLP_PATH", "yt-dlp"),
-		FFmpegPath:          getenv("FFMPEG_PATH", "ffmpeg"),
 		DataDir:             dataDir,
 		CacheDir:            cacheDir,
 		CacheLimitBytes:     mustAtoi64(cacheLimit),
