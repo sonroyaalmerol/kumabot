@@ -146,6 +146,18 @@ func (p *Player) QueueSize() int {
 	return len(p.SongQueue) - p.Qpos - 1
 }
 
+func (p *Player) MaybeAutoplayAfterAdd(
+	ctx context.Context,
+	s *discordgo.Session,
+) {
+	p.mu.Lock()
+	shouldPlay := p.Status != StatusPlaying && p.currentLocked() != nil
+	p.mu.Unlock()
+	if shouldPlay {
+		go func() { _ = p.Play(ctx, s) }()
+	}
+}
+
 func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -651,6 +663,13 @@ func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
 	// Continue from current position
 	pos := p.PositionSec
 	p.requestedSeek = &pos
+
+	// Ensure any lingering playback is canceled
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
+	}
+
 	go func() { _ = p.Play(ctx, s) }()
 	return nil
 }

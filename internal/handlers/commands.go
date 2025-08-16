@@ -382,88 +382,59 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		return
 	}
 
-	start := time.Now()
-	newSongs, extraMsg, err := plib.ResolveQueryToSongs(ctx, h.cfg, query, set.PlaylistLimit, split)
-	if err != nil || len(newSongs) == 0 {
-		if err != nil {
-			slog.Debug("resolve query failed", "guildID", guildID, "userID", memberID, "query", query, "err", err)
-		} else {
-			slog.Debug("resolve query empty", "guildID", guildID, "userID", memberID, "query", query)
+	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split)
+
+	msg := ""
+	first := true
+	for ev := range streamCh {
+		if ev.Info != "" {
 		}
+		if ev.Err != nil && ev.Song.URL == "" {
+			slog.Debug("resolve query failed", "guildID", guildID, "userID", memberID, "query", query, "err", err)
+			continue
+		}
+		if ev.Song.URL != "" {
+			ev.Song.RequestedBy = memberID
+			ev.Song.AddedInChan = i.ChannelID
+			player.Add(ev.Song, false)
+			if first {
+				first = false
+				player.MaybeAutoplayAfterAdd(ctx, s)
+				msg = fmt.Sprintf("u betcha, %s added to the%s queue%s%s",
+					utils.EscapeMd(ev.Song.Title),
+					func() string {
+						if immediate {
+							return " front of the"
+						}
+						return ""
+					}(),
+					func() string {
+						if skip {
+							return " and current track skipped"
+						}
+						return ""
+					}(),
+					func() string {
+						if ev.Info != "" {
+							return " (" + ev.Info + ")"
+						}
+						return ""
+					}(),
+				)
+			}
+			slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
+		}
+	}
+
+	if first {
 		h.editReply(s, i, "no songs found")
 		return
 	}
-	slog.Info("resolved query", "guildID", guildID, "userID", memberID, "query", query, "count", len(newSongs), "took", time.Since(start))
 
-	if shuffleAdd && len(newSongs) > 1 {
-		utils.ShuffleSlice(newSongs)
+	if shuffleAdd {
+		//TODO: shuffle
 	}
 
-	for idx := range newSongs {
-		newSongs[idx].RequestedBy = memberID
-		newSongs[idx].AddedInChan = i.ChannelID
-		player.Add(newSongs[idx], immediate)
-	}
-	slog.Debug("enqueued songs", "guildID", guildID, "count", len(newSongs), "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
-
-	wasIdle := player.Status == plib.StatusIdle
-	if skip {
-		if err := player.Forward(ctx, s, 1); err != nil {
-			slog.Debug("forward on skip failed", "guildID", guildID, "err", err)
-		}
-	}
-
-	if wasIdle {
-		if err := player.Play(ctx, s); err != nil {
-			slog.Error("play failed", "guild", i.GuildID, "err", err)
-			h.editReply(s, i, "failed to start playback")
-			return
-		}
-		slog.Info("started playback", "guildID", guildID, "userID", memberID)
-	}
-
-	first := newSongs[0]
-	msg := ""
-	if len(newSongs) == 1 {
-		msg = fmt.Sprintf("u betcha, %s added to the%s queue%s%s",
-			utils.EscapeMd(first.Title),
-			func() string {
-				if immediate {
-					return " front of the"
-				}
-				return ""
-			}(),
-			func() string {
-				if skip {
-					return " and current track skipped"
-				}
-				return ""
-			}(),
-			func() string {
-				if extraMsg != "" {
-					return " (" + extraMsg + ")"
-				}
-				return ""
-			}(),
-		)
-	} else {
-		msg = fmt.Sprintf("u betcha, %s and %d other songs were added to the queue%s%s",
-			utils.EscapeMd(first.Title),
-			len(newSongs)-1,
-			func() string {
-				if skip {
-					return " and current track skipped"
-				}
-				return ""
-			}(),
-			func() string {
-				if extraMsg != "" {
-					return " (" + extraMsg + ")"
-				}
-				return ""
-			}(),
-		)
-	}
 	h.editReply(s, i, msg)
 }
 
