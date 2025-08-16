@@ -2,25 +2,33 @@ package stream
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
-// We ask ffmpeg to output raw Opus stream at 48kHz stereo, 20ms frames, payload type 120.
-// Then we read frames and send via discordgo's opus frame sender.
-
 type OpusStreamer struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
+	stderr *bytes.Buffer
 	cancel context.CancelFunc
 }
 
-func StartOpusStream(ctx context.Context, ffmpegPath string, inputURL string, seek *int, to *int, volumeDB *string) (*OpusStreamer, error) {
+func StartOpusStream(
+	ctx context.Context,
+	ffmpegPath string,
+	inputURL string,
+	seek *int,
+	to *int,
+	volumeDB *string,
+) (*OpusStreamer, error) {
 	ctx2, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -40,7 +48,7 @@ func StartOpusStream(ctx context.Context, ffmpegPath string, inputURL string, se
 	if volumeDB != nil && *volumeDB != "" {
 		args = append(args, "-filter:a", "volume="+*volumeDB)
 	}
-	// Output as raw opus stream
+	// Output as raw opus stream: 48kHz stereo, 20ms packets
 	args = append(args,
 		"-c:a", "libopus",
 		"-b:a", "160k",
@@ -54,24 +62,16 @@ func StartOpusStream(ctx context.Context, ffmpegPath string, inputURL string, se
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
-	cmd.Stderr = cmd.Stdout
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, err
+		return nil, fmt.Errorf("ffmpeg start: %w (stderr: %s)", err, stderr.String())
 	}
-	return &OpusStreamer{cmd: cmd, stdout: stdout, cancel: cancel}, nil
-}
-
-func (s *OpusStreamer) ReadFrame(r *bufio.Reader, buf []byte) (int, error) {
-	// Opus raw packets can be variable length. For Discord we can send variable-length frames
-	// as long as each represents 20ms @ 48kHz encoded with libopus.
-	// We'll read based on ReadSlice with a small timeout; but better is Ogg/Matroska demux.
-	// Simpler approach: Read up to len(buf) per frame with small sleeps; ffmpeg outputs packets.
-	// Here we approximate by chunk reads; Discord accepts frames without specific RTP encapsulation via Send.
-	return r.Read(buf)
+	return &OpusStreamer{cmd: cmd, stdout: stdout, stderr: stderr, cancel: cancel}, nil
 }
 
 func (s *OpusStreamer) Close() {
@@ -80,27 +80,67 @@ func (s *OpusStreamer) Close() {
 	_ = s.cmd.Wait()
 }
 
+func (s *OpusStreamer) Stderr() string {
+	if s.stderr == nil {
+		return ""
+	}
+	return s.stderr.String()
+}
+
 // SendOpus pumps frames into the voice connection.
+// It assumes ffmpeg is producing correctly framed Opus packets at 20 ms intervals.
+// We still protect against blocking and early EOF.
 func SendOpus(vc *discordgo.VoiceConnection, s *OpusStreamer) error {
-	vc.Speaking(true)
+	// Wait until the connection is ready (up to a few seconds)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if vc == nil || !vc.Ready {
+		return fmt.Errorf("voice connection not ready")
+	}
+
+	if err := vc.Speaking(true); err != nil {
+		// Not fatal, but good to know
+	}
 	defer vc.Speaking(false)
 
-	reader := bufio.NewReader(s.stdout)
-	frame := make([]byte, 4096)
+	reader := bufio.NewReaderSize(s.stdout, 4096)
+
+	// 4 KiB is fine for a single Opus packet at 20ms 160kbps; adjust if needed.
+	frameBuf := make([]byte, 4096)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
-		n, err := reader.Read(frame)
+		// Read a packet. We can't rely on newline or separator; ffmpeg writes raw packets.
+		// strategy: read whatever is available up to buffer size. If zero bytes available,
+		// perform a small sleep via the ticker to approximate 20ms pacing.
+		n, err := reader.Read(frameBuf)
 		if n > 0 {
-			// Send raw opus frame
-			vc.OpusSend <- frame[:n]
-			// Sleep approx frame duration; opusenc -frame_duration 20ms
-			time.Sleep(20 * time.Millisecond)
+			// Non-blocking send to avoid deadlocks if vc stops
+			select {
+			case vc.OpusSend <- frameBuf[:n]:
+			case <-time.After(200 * time.Millisecond):
+				// If we can't send within 200ms, likely connection not accepting frames
+				// Exit with error so caller can advance / reconnect
+				return fmt.Errorf("opus send timed out")
+			}
 		}
+
 		if err != nil {
 			if err == io.EOF {
+				// Include stderr for diagnostics
+				st := s.Stderr()
+				if strings.TrimSpace(st) != "" {
+					return fmt.Errorf("ffmpeg ended: %s", st)
+				}
 				return nil
 			}
 			return err
 		}
+
+		// Pace approximately 20ms per frame
+		<-ticker.C
 	}
 }
