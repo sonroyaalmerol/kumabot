@@ -3,6 +3,7 @@ package player
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -204,7 +205,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		err := stream.SendOpus(vc, st)
 		st.Close()
 		if err != nil {
-			// skip on error
+			slog.Error("opus send failed", "guild", p.guildID, "err", err)
 			_ = p.Forward(ctx, s, 1)
 			return
 		}

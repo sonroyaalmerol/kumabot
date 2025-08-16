@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/sonroyaalmerol/kumabot/internal/autocomplete"
@@ -29,6 +31,9 @@ func NewCommandHandler(cfg *config.Config, repo *repository.Repo, cache *cache.F
 }
 
 func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, guildID string) error {
+	start := time.Now()
+	slog.Info("registering application commands", "appID", appID, "guildID", guildID)
+
 	cmds := []*discordgo.ApplicationCommand{
 		{
 			Name:        "play",
@@ -152,24 +157,34 @@ func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, gu
 		{Name: "resume", Description: "resume playback"},
 		{Name: "unskip", Description: "go back in the queue by one song"},
 	}
+
 	scopeGuild := guildID
 	if scopeGuild == "" {
 		// register globally
 	}
+
 	for _, c := range cmds {
 		if _, err := s.ApplicationCommandCreate(appID, scopeGuild, c); err != nil {
+			slog.Error("failed to create application command", "guildID", scopeGuild, "command", c.Name, "err", err)
 			return err
 		}
+		slog.Debug("registered command", "guildID", scopeGuild, "command", c.Name)
 	}
+
+	slog.Info("finished registering commands", "guildID", scopeGuild, "count", len(cmds), "took", time.Since(start))
 	return nil
 }
 
 func (h *CommandHandler) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
+		slog.Debug("interaction: application command", "guildID", i.GuildID, "userID", userIDOf(i), "command", i.ApplicationCommandData().Name)
 		h.handleChatCommand(s, i)
 	case discordgo.InteractionApplicationCommandAutocomplete:
+		slog.Debug("interaction: autocomplete", "guildID", i.GuildID, "userID", userIDOf(i))
 		h.handleAutocomplete(s, i)
+	default:
+		slog.Debug("interaction: ignored type", "type", i.Type, "guildID", i.GuildID)
 	}
 }
 
@@ -202,10 +217,16 @@ func (h *CommandHandler) handleAutocomplete(s *discordgo.Session, i *discordgo.I
 		client, err := spotify.NewClientCredentials(h.cfg.SpotifyClientID, h.cfg.SpotifyClientSecret)
 		if err == nil {
 			spClient = client
+		} else {
+			slog.Debug("spotify client init failed", "err", err)
 		}
 	}
 
-	choices, _ := autocomplete.GetYouTubeAndSpotifySuggestions(context.Background(), query, spClient, 10)
+	slog.Debug("autocomplete: fetching suggestions", "guildID", i.GuildID, "userID", userIDOf(i), "query", query)
+	choices, err := autocomplete.GetYouTubeAndSpotifySuggestions(context.Background(), query, spClient, 10)
+	if err != nil {
+		slog.Warn("autocomplete suggestions error", "guildID", i.GuildID, "err", err)
+	}
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
 		Data: &discordgo.InteractionResponseData{
@@ -256,6 +277,8 @@ func (h *CommandHandler) handleChatCommand(s *discordgo.Session, i *discordgo.In
 		h.cmdResume(s, i)
 	case "unskip":
 		h.cmdUnskip(s, i)
+	default:
+		slog.Debug("unknown command", "name", data.Name, "guildID", i.GuildID, "userID", userIDOf(i))
 	}
 }
 
@@ -264,13 +287,15 @@ func (h *CommandHandler) reply(s *discordgo.Session, i *discordgo.InteractionCre
 	if ephemeral {
 		flags = 1 << 6
 	}
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: content,
 			Flags:   discordgo.MessageFlags(flags),
 		},
-	})
+	}); err != nil {
+		slog.Warn("reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+	}
 }
 
 func (h *CommandHandler) deferReply(s *discordgo.Session, i *discordgo.InteractionCreate, ephemeral bool) {
@@ -278,18 +303,22 @@ func (h *CommandHandler) deferReply(s *discordgo.Session, i *discordgo.Interacti
 	if ephemeral {
 		flags = 1 << 6
 	}
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Flags: discordgo.MessageFlags(flags),
 		},
-	})
+	}); err != nil {
+		slog.Warn("defer reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+	}
 }
 
 func (h *CommandHandler) editReply(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
-	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: &content,
-	})
+	}); err != nil {
+		slog.Warn("edit reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+	}
 }
 
 func userInVoice(s *discordgo.Session, guildID, userID string) (channelID string, ok bool) {
@@ -322,27 +351,49 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	chID, ok := userInVoice(s, guildID, memberID)
 	if !ok {
+		slog.Debug("user not in voice", "guildID", guildID, "userID", memberID)
 		h.reply(s, i, "gotta be in a voice channel", true)
 		return
 	}
 
 	ctx := context.Background()
-	_, _ = h.repo.UpsertSettings(ctx, guildID)
-	set, _ := h.repo.GetSettings(ctx, guildID)
+	if _, err := h.repo.UpsertSettings(ctx, guildID); err != nil {
+		slog.Warn("upsert settings failed", "guildID", guildID, "err", err)
+	}
+	set, err := h.repo.GetSettings(ctx, guildID)
+	if err != nil {
+		slog.Error("get settings failed", "guildID", guildID, "err", err)
+		h.reply(s, i, "internal error", true)
+		return
+	}
 
 	h.deferReply(s, i, set.QAddEphemeral)
 
 	player := h.pm.Get(h.cfg, h.repo, h.cache, guildID)
+	if player == nil {
+		slog.Error("player manager returned nil", "guildID", guildID)
+		h.editReply(s, i, "internal player error")
+		return
+	}
+
 	if err := player.Connect(s, guildID, chID); err != nil {
+		slog.Warn("voice connect failed", "guildID", guildID, "channelID", chID, "err", err)
 		h.editReply(s, i, "couldn't connect to channel")
 		return
 	}
 
+	start := time.Now()
 	newSongs, extraMsg, err := plib.ResolveQueryToSongs(ctx, h.cfg, query, set.PlaylistLimit, split)
 	if err != nil || len(newSongs) == 0 {
+		if err != nil {
+			slog.Debug("resolve query failed", "guildID", guildID, "userID", memberID, "query", query, "err", err)
+		} else {
+			slog.Debug("resolve query empty", "guildID", guildID, "userID", memberID, "query", query)
+		}
 		h.editReply(s, i, "no songs found")
 		return
 	}
+	slog.Info("resolved query", "guildID", guildID, "userID", memberID, "query", query, "count", len(newSongs), "took", time.Since(start))
 
 	if shuffleAdd && len(newSongs) > 1 {
 		utils.ShuffleSlice(newSongs)
@@ -353,17 +404,22 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		newSongs[idx].AddedInChan = i.ChannelID
 		player.Add(newSongs[idx], immediate)
 	}
+	slog.Debug("enqueued songs", "guildID", guildID, "count", len(newSongs), "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 
 	wasIdle := player.Status == plib.StatusIdle
 	if skip {
-		_ = player.Forward(ctx, s, 1)
+		if err := player.Forward(ctx, s, 1); err != nil {
+			slog.Debug("forward on skip failed", "guildID", guildID, "err", err)
+		}
 	}
 
 	if wasIdle {
 		if err := player.Play(ctx, s); err != nil {
+			slog.Error("play failed", "guild", i.GuildID, "err", err)
 			h.editReply(s, i, "failed to start playback")
 			return
 		}
+		slog.Info("started playback", "guildID", guildID, "userID", memberID)
 	}
 
 	first := newSongs[0]
@@ -428,6 +484,7 @@ func (h *CommandHandler) cmdPlay(s *discordgo.Session, i *discordgo.InteractionC
 			skip = o.BoolValue()
 		}
 	}
+	slog.Info("cmd play", "guildID", i.GuildID, "userID", userIDOf(i), "query", query, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 	h.enqueueAndMaybeStart(s, i, query, immediate, shuffleAdd, split, skip)
 }
 
@@ -442,6 +499,7 @@ func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 	player.Stop()
+	slog.Info("cmd stop", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "u betcha, stopped", false)
 }
 
@@ -452,12 +510,14 @@ func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 	player.Disconnect()
+	slog.Info("cmd disconnect", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "u betcha, disconnected", false)
 }
 
 func (h *CommandHandler) cmdClear(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	player.Clear()
+	slog.Info("cmd clear queue", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "clearer than a field after a fresh harvest", false)
 }
 
@@ -469,13 +529,16 @@ func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
+	slog.Debug("cmd now-playing", "guildID", i.GuildID, "userID", userIDOf(i), "title", cur.Title)
 	embed := ui.BuildPlayingEmbed(player)
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{embed},
 		},
-	})
+	}); err != nil {
+		slog.Warn("now-playing respond failed", "guildID", i.GuildID, "err", err)
+	}
 }
 
 func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -504,7 +567,12 @@ func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.Interaction
 		h.reply(s, i, "can't seek past the end of the song", true)
 		return
 	}
-	_ = player.Seek(context.Background(), s, player.GetPosition()+sec)
+	if err := player.Seek(context.Background(), s, player.GetPosition()+sec); err != nil {
+		slog.Debug("seek failed", "guildID", i.GuildID, "err", err)
+		h.reply(s, i, "seek failed", true)
+		return
+	}
+	slog.Info("cmd fseek", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec)
 	h.reply(s, i, "👍 seeked to "+utils.PrettyTime(player.GetPosition()), false)
 }
 
@@ -526,9 +594,11 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 				h.reply(s, i, "a favorite with that name already exists", true)
 				return
 			}
+			slog.Warn("favorite create failed", "guildID", i.GuildID, "userID", userIDOf(i), "name", name, "err", err)
 			h.reply(s, i, "failed to create favorite", true)
 			return
 		}
+		slog.Info("favorite created", "guildID", i.GuildID, "userID", userIDOf(i), "name", name)
 		h.reply(s, i, "👍 favorite created", false)
 	case "remove":
 		var name string
@@ -547,10 +617,18 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 			h.reply(s, i, "you can only remove your own favorites", true)
 			return
 		}
-		_, _ = h.favs.Remove(ctx, i.GuildID, name)
+		if _, err := h.favs.Remove(ctx, i.GuildID, name); err != nil {
+			slog.Warn("favorite remove failed", "guildID", i.GuildID, "userID", userIDOf(i), "name", name, "err", err)
+			h.reply(s, i, "failed to remove favorite", true)
+			return
+		}
+		slog.Info("favorite removed", "guildID", i.GuildID, "userID", userIDOf(i), "name", name)
 		h.reply(s, i, "👍 favorite removed", false)
 	case "list":
-		items, _ := h.favs.List(ctx, i.GuildID)
+		items, err := h.favs.List(ctx, i.GuildID)
+		if err != nil {
+			slog.Warn("favorite list failed", "guildID", i.GuildID, "err", err)
+		}
 		if len(items) == 0 {
 			h.reply(s, i, "there aren't any favorites yet", false)
 			return
@@ -559,6 +637,7 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 		for _, f := range items {
 			b.WriteString(fmt.Sprintf("• %s: %s (<@%s>)\n", f.Name, f.Query, f.Author))
 		}
+		slog.Debug("favorite list", "guildID", i.GuildID, "count", len(items))
 		h.reply(s, i, b.String(), true)
 	case "use":
 		var name string
@@ -582,17 +661,25 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 			h.reply(s, i, "no favorite with that name exists", true)
 			return
 		}
+		slog.Info("favorite used", "guildID", i.GuildID, "userID", userIDOf(i), "name", name)
 		h.enqueueAndMaybeStart(s, i, f.Query, immediate, shuffleAdd, split, skip)
 	}
 }
 
 func (h *CommandHandler) cmdConfig(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx := context.Background()
-	_, _ = h.repo.UpsertSettings(ctx, i.GuildID)
+	if _, err := h.repo.UpsertSettings(ctx, i.GuildID); err != nil {
+		slog.Warn("upsert settings failed", "guildID", i.GuildID, "err", err)
+	}
 	sub := i.ApplicationCommandData().Options[0]
 	switch sub.Name {
 	case "get":
-		set, _ := h.repo.GetSettings(ctx, i.GuildID)
+		set, err := h.repo.GetSettings(ctx, i.GuildID)
+		if err != nil {
+			slog.Error("get settings failed", "guildID", i.GuildID, "err", err)
+			h.reply(s, i, "failed to fetch config", true)
+			return
+		}
 		msg := fmt.Sprintf(
 			"Config\n- Playlist Limit: %d\n- Wait before leaving after queue empty: %s\n- Leave if no listeners: %t\n- Auto announce next song: %t\n- Add to queue responses ephemeral: %t\n- Default volume: %d\n- Default queue page size: %d\n- Reduce volume when people speak: %t",
 			set.PlaylistLimit,
@@ -610,6 +697,7 @@ func (h *CommandHandler) cmdConfig(s *discordgo.Session, i *discordgo.Interactio
 			set.DefaultQueuePageSize,
 			set.TurnDownWhenSpeaking,
 		)
+		slog.Debug("config get", "guildID", i.GuildID)
 		h.reply(s, i, msg, false)
 	case "set-playlist-limit":
 		limit := int(sub.Options[0].IntValue())
@@ -620,42 +708,49 @@ func (h *CommandHandler) cmdConfig(s *discordgo.Session, i *discordgo.Interactio
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.PlaylistLimit = limit
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "PlaylistLimit", "value", limit)
 		h.reply(s, i, "👍 limit updated", false)
 	case "set-wait-after-queue-empties":
 		delay := int(sub.Options[0].IntValue())
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.SecondsWaitAfterEmpty = delay
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "SecondsWaitAfterEmpty", "value", delay)
 		h.reply(s, i, "👍 wait delay updated", false)
 	case "set-leave-if-no-listeners":
 		val := sub.Options[0].BoolValue()
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.LeaveIfNoListeners = val
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "LeaveIfNoListeners", "value", val)
 		h.reply(s, i, "👍 leave setting updated", false)
 	case "set-queue-add-response-hidden":
 		val := sub.Options[0].BoolValue()
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.QAddEphemeral = val
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "QAddEphemeral", "value", val)
 		h.reply(s, i, "👍 queue add notification setting updated", false)
 	case "set-auto-announce-next-song":
 		val := sub.Options[0].BoolValue()
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.AutoAnnounceNext = val
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "AutoAnnounceNext", "value", val)
 		h.reply(s, i, "👍 auto announce setting updated", false)
 	case "set-default-volume":
 		val := int(sub.Options[0].IntValue())
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.DefaultVolume = val
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "DefaultVolume", "value", val)
 		h.reply(s, i, "👍 volume setting updated", false)
 	case "set-default-queue-page-size":
 		val := int(sub.Options[0].IntValue())
 		set, _ := h.repo.GetSettings(ctx, i.GuildID)
 		set.DefaultQueuePageSize = val
 		_ = h.repo.UpdateSettings(ctx, set)
+		slog.Info("config updated", "guildID", i.GuildID, "key", "DefaultQueuePageSize", "value", val)
 		h.reply(s, i, "👍 default queue page size updated", false)
 	}
 }
@@ -667,6 +762,7 @@ func (h *CommandHandler) cmdLoop(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 	on := player.ToggleLoopSong()
+	slog.Info("cmd loop song", "guildID", i.GuildID, "userID", userIDOf(i), "on", on)
 	if on {
 		h.reply(s, i, "looped :)", false)
 	} else {
@@ -678,9 +774,11 @@ func (h *CommandHandler) cmdLoopQueue(s *discordgo.Session, i *discordgo.Interac
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	on, err := player.ToggleLoopQueue()
 	if err != nil {
+		slog.Warn("toggle loop queue failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
+	slog.Info("cmd loop queue", "guildID", i.GuildID, "userID", userIDOf(i), "on", on)
 	if on {
 		h.reply(s, i, "looped queue :)", false)
 	} else {
@@ -705,18 +803,22 @@ func (h *CommandHandler) cmdMove(s *discordgo.Session, i *discordgo.InteractionC
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	item, err := player.Move(from, to)
 	if err != nil {
+		slog.Debug("move failed", "guildID", i.GuildID, "from", from, "to", to, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
-	h.reply(s, i, fmt.Sprintf("moved **%s** to position **%d**", utils.EscapeMd(item.Title), to), false)
+	slog.Info("cmd move", "guildID", i.GuildID, "userID", userIDOf(i), "from", from, "to", to, "title", item.Title)
+	h.reply(s, i, fmt.Sprintf("moved %s to position %d", utils.EscapeMd(item.Title), to), false)
 }
 
 func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if err := player.Next(context.Background(), s); err != nil {
+		slog.Debug("next failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, "no song to skip to", true)
 		return
 	}
+	slog.Info("cmd next", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "skipped to next", false)
 }
 
@@ -727,16 +829,25 @@ func (h *CommandHandler) cmdPause(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 	if err := player.PauseCmd(); err != nil {
+		slog.Debug("pause failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
+	slog.Info("cmd pause", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "the stop-and-go light is now red", false)
 }
 
 func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx := context.Background()
-	_, _ = h.repo.UpsertSettings(ctx, i.GuildID)
-	set, _ := h.repo.GetSettings(ctx, i.GuildID)
+	if _, err := h.repo.UpsertSettings(ctx, i.GuildID); err != nil {
+		slog.Warn("upsert settings failed", "guildID", i.GuildID, "err", err)
+	}
+	set, err := h.repo.GetSettings(ctx, i.GuildID)
+	if err != nil {
+		slog.Error("get settings failed", "guildID", i.GuildID, "err", err)
+		h.reply(s, i, "failed to fetch settings", true)
+		return
+	}
 
 	page := 1
 	pageSize := set.DefaultQueuePageSize
@@ -757,16 +868,20 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 
 	embed, err := ui.BuildQueueEmbed(player, page, pageSize)
 	if err != nil {
+		slog.Debug("build queue embed failed", "guildID", i.GuildID, "page", page, "pageSize", pageSize, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{embed},
 			Flags:  1 << 6, // ephemeral if desired
 		},
-	})
+	}); err != nil {
+		slog.Warn("queue respond failed", "guildID", i.GuildID, "err", err)
+	}
+	slog.Debug("cmd queue", "guildID", i.GuildID, "userID", userIDOf(i), "page", page, "pageSize", pageSize)
 }
 
 func (h *CommandHandler) cmdRemove(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -781,18 +896,22 @@ func (h *CommandHandler) cmdRemove(s *discordgo.Session, i *discordgo.Interactio
 	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if err := player.RemoveFromQueue(pos, cnt); err != nil {
+		slog.Debug("remove from queue failed", "guildID", i.GuildID, "pos", pos, "cnt", cnt, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
+	slog.Info("cmd remove", "guildID", i.GuildID, "userID", userIDOf(i), "pos", pos, "cnt", cnt)
 	h.reply(s, i, ":wastebasket: removed", false)
 }
 
 func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if err := player.Replay(context.Background(), s); err != nil {
+		slog.Debug("replay failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
+	slog.Info("cmd replay", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "👍 replayed the current song", false)
 }
 
@@ -807,23 +926,34 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 		return
 	}
 	if err := player.Resume(context.Background(), s); err != nil {
+		slog.Debug("resume failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
 	}
+	slog.Info("cmd resume", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "the stop-and-go light is now green", false)
 }
 
 func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if err := player.Back(context.Background(), s); err != nil {
+		slog.Debug("unskip/back failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, "no song to go back to", true)
 		return
 	}
-	// Optionally show now playing (simple text)
 	cur := player.GetCurrent()
 	if cur != nil {
+		slog.Info("cmd unskip", "guildID", i.GuildID, "userID", userIDOf(i), "title", cur.Title)
 		h.reply(s, i, fmt.Sprintf("back 'er up' — now playing %s", utils.EscapeMd(cur.Title)), false)
 	} else {
+		slog.Info("cmd unskip", "guildID", i.GuildID, "userID", userIDOf(i))
 		h.reply(s, i, "back 'er up'", false)
 	}
+}
+
+func userIDOf(i *discordgo.InteractionCreate) string {
+	if i == nil || i.Member == nil || i.Member.User == nil {
+		return ""
+	}
+	return i.Member.User.ID
 }
