@@ -841,7 +841,7 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 
-	embed, err := ui.BuildQueueEmbed(player, page, pageSize)
+	embed, err := ui.BuildQueueEmbed(player, page, pageSize, h.ongoingSearchQueue.Load())
 	if err != nil {
 		slog.Debug("build queue embed failed", "guildID", i.GuildID, "page", page, "pageSize", pageSize, "err", err)
 		h.reply(s, i, err.Error(), true)
