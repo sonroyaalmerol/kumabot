@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.25-trixie AS builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN go build -ldflags "-s -w" -o /out/kumabot ./cmd/kumabot
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
