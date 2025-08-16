@@ -7,7 +7,7 @@ RUN go mod download
 
 COPY . .
 
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=1
 RUN go build -ldflags "-s -w" -o /out/kumabot ./cmd/kumabot
 
 FROM debian:trixie-slim
@@ -18,6 +18,7 @@ RUN apt-get update && \
       curl \
       tzdata \
       ffmpeg \
+      libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 10001 kumabot

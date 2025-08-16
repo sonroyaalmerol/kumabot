@@ -1,8 +1,12 @@
 package player
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -159,7 +163,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 
 	p.stopTracking()
 
-	// Prepare stream
+	// Prepare seek window
 	var seek *int
 	var to *int
 	pos := 0
@@ -173,9 +177,6 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 
 	// Resolve media input URL
 	inputURL := ""
-	var volumeAdj *string
-	volumeAdj = nil // implement loudness if desired by probing formats; omitted here
-
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
 	} else {
@@ -193,44 +194,60 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		}
 	}
 
-	// Start ffmpeg -> opus
-	streamer, err := stream.StartOpusStream(ctx, inputURL, seek, to, volumeAdj)
+	// Start ffmpeg PCM -> we will encode to Opus (DCA framing) ourselves
+	pcm, err := stream.StartPCMStream(ctx, inputURL, seek, to)
 	if err != nil {
 		return err
 	}
+	// We defer Close() from within the goroutine to ensure it lasts as long as streaming
+	// defer pcm.Close()
 
+	// Create DCA encoder and pipe
+	enc, err := stream.NewDCAEncoder()
+	if err != nil {
+		pcm.Close()
+		return err
+	}
+	pr, pw := io.Pipe()
+
+	// Encode PCM -> DCA in background
+	go func() {
+		defer pw.Close()
+		defer pcm.Close()
+		if err := enc.EncodePCMToDCA(pcm.Stdout(), pw); err != nil && err != io.EOF {
+			_ = pw.CloseWithError(err)
+		}
+	}()
+
+	// Update player state
 	p.Status = StatusPlaying
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
 	p.PositionSec = pos
 	p.startTracking(pos)
 
-	// Send opus frames in a goroutine
-	go func(vc *discordgo.VoiceConnection, st *stream.OpusStreamer, song *SongMetadata) {
-		err := stream.SendOpus(vc, st)
-		st.Close()
+	// Send DCA packets in background (one packet per 20ms tick)
+	go func(vc *discordgo.VoiceConnection, r io.Reader, song *SongMetadata) {
+		err := sendDCA(vc, r)
 
-		// Do NOT hold p.mu while calling methods that acquire p.mu themselves.
+		// Playback finished or errored; update and advance
 		p.mu.Lock()
 		loopingSong := p.LoopSong && p.Status == StatusPlaying
 		loopingQueue := p.LoopQueue && p.Status == StatusPlaying && song != nil
 		p.mu.Unlock()
 
 		if err != nil {
-			// Move to next track, or schedule idle
-			slog.Error("send opus stream", "song", song.Title, "err", err)
+			slog.Error("send DCA stream", "song", song.Title, "err", err)
 			_ = p.Forward(ctx, s, 1)
 			return
 		}
 
 		if loopingSong {
-			// Seek to 0
 			_ = p.Seek(ctx, s, 0)
 			return
 		}
 
 		if loopingQueue {
-			// Re-add current song to end of queue
 			p.mu.Lock()
 			if song != nil {
 				p.SongQueue = append(p.SongQueue, *song)
@@ -239,9 +256,58 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		}
 
 		_ = p.Forward(ctx, s, 1)
-	}(p.Conn, streamer, cur)
+	}(p.Conn, pr, cur)
 
 	return nil
+}
+
+// sendDCA reads DCA-framed packets (uint16 len + opus packet) from r,
+// and sends exactly one opus packet every 20ms to vc.OpusSend.
+func sendDCA(vc *discordgo.VoiceConnection, r io.Reader) error {
+	// Wait until ready
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if vc == nil || !vc.Ready {
+		return fmt.Errorf("voice connection not ready")
+	}
+
+	_ = vc.Speaking(true)
+	defer vc.Speaking(false)
+
+	br := bufio.NewReaderSize(r, 32*1024)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	var hdr [2]byte
+	for {
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+			return fmt.Errorf("read dca len: %w", err)
+		}
+		n := binary.LittleEndian.Uint16(hdr[:])
+		if n == 0 {
+			<-ticker.C
+			continue
+		}
+		packet := make([]byte, int(n))
+		if _, err := io.ReadFull(br, packet); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+			return fmt.Errorf("read dca packet: %w", err)
+		}
+
+		<-ticker.C
+		select {
+		case vc.OpusSend <- packet:
+		case <-time.After(200 * time.Millisecond):
+			return fmt.Errorf("opus send timeout")
+		}
+	}
 }
 
 func (p *Player) Pause() error {
@@ -327,9 +393,9 @@ func (p *Player) Seek(ctx context.Context, s *discordgo.Session, posSec int) err
 	}
 	p.Status = StatusPaused
 	p.stopTracking()
-	// We just restart stream with seek
+	// We just restart stream with seek (Play() recomputes offset window)
 	p.mu.Unlock()
-	err := p.Play(ctx, s) // Play() pulls offset from cur.Offset, but we want absolute
+	err := p.Play(ctx, s)
 	p.mu.Lock()
 	p.PositionSec = posSec
 	return err
@@ -500,25 +566,4 @@ func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
 
 func (p *Player) PauseCmd() error {
 	return p.Pause()
-}
-
-// GetQueuePage returns a slice of the queue (excluding current) with pagination.
-func (p *Player) GetQueuePage(page, pageSize int) ([]SongMetadata, int) {
-	if page <= 0 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = 10
-	}
-	q := p.Queue()
-	total := len(q)
-	start := (page - 1) * pageSize
-	if start >= total {
-		return []SongMetadata{}, total
-	}
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
-	return q[start:end], total
 }
