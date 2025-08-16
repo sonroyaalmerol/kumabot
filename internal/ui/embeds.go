@@ -81,7 +81,12 @@ func BuildPlayingEmbed(p *player.Player) *discordgo.MessageEmbed {
 	return embed
 }
 
-func BuildQueueEmbed(p *player.Player, page int, pageSize int) (*discordgo.MessageEmbed, error) {
+func BuildQueueEmbed(
+	p *player.Player,
+	page int,
+	pageSize int,
+	ongoingQueue bool,
+) (*discordgo.MessageEmbed, error) {
 	cur := p.GetCurrent()
 	if cur == nil {
 		return nil, fmt.Errorf("queue is empty")
@@ -92,6 +97,7 @@ func BuildQueueEmbed(p *player.Player, page int, pageSize int) (*discordgo.Messa
 		return nil, fmt.Errorf("the queue isn't that big")
 	}
 	items, _ := p.GetQueuePage(page, pageSize)
+
 	// Build list
 	out := ""
 	begin := (page - 1) * pageSize
@@ -103,14 +109,18 @@ func BuildQueueEmbed(p *player.Player, page int, pageSize int) (*discordgo.Messa
 		}
 		out += fmt.Sprintf("`%d.` %s `[ %s ]`\n", n, songLink(s), dur)
 	}
+
 	totalLen := 0
 	for _, s := range p.Queue() {
 		totalLen += s.Length
 	}
 
-	desc := fmt.Sprintf("**%s**\nRequested by: <@%s>\n\n",
-		songLink(*cur), cur.RequestedBy,
+	desc := fmt.Sprintf(
+		"**%s**\nRequested by: <@%s>\n\n",
+		songLink(*cur),
+		cur.RequestedBy,
 	)
+
 	// Now-playing UI line
 	pos := p.GetPosition()
 	progress := 0.0
@@ -120,13 +130,22 @@ func BuildQueueEmbed(p *player.Player, page int, pageSize int) (*discordgo.Messa
 	bar := ProgressBar(10, progress)
 	elapsed := "live"
 	if !cur.IsLive {
-		elapsed = fmt.Sprintf("%s/%s", utils.PrettyTime(pos), utils.PrettyTime(cur.Length))
+		elapsed = fmt.Sprintf(
+			"%s/%s",
+			utils.PrettyTime(pos),
+			utils.PrettyTime(cur.Length),
+		)
 	}
 	loop := ""
 	if p.LoopSong {
 		loop = " (loop on)"
 	}
 	desc += fmt.Sprintf("%s `[ %s ]`\n\n", bar, elapsed)
+
+	// Show resolving note inline in the description so users don’t miss it
+	if ongoingQueue {
+		desc += "Note: still resolving more items… they will appear here as they’re ready.\n\n"
+	}
 
 	if len(items) > 0 {
 		desc += "**Up next:**\n" + out
@@ -137,9 +156,32 @@ func BuildQueueEmbed(p *player.Player, page int, pageSize int) (*discordgo.Messa
 		Description: desc,
 		Color:       0x006400,
 		Fields: []*discordgo.MessageEmbedField{
-			{Name: "In queue", Value: queueInfo(p), Inline: true},
-			{Name: "Total length", Value: totalLenStr(totalLen), Inline: true},
-			{Name: "Page", Value: fmt.Sprintf("%d out of %d", page, maxPage), Inline: true},
+			{
+				Name:   "In queue",
+				Value:  queueInfo(p),
+				Inline: true,
+			},
+			{
+				Name:   "Total length",
+				Value:  totalLenStr(totalLen),
+				Inline: true,
+			},
+			{
+				Name:   "Page",
+				Value:  fmt.Sprintf("%d out of %d", page, maxPage),
+				Inline: true,
+			},
+			{
+				Name: "Resolving",
+				Value: func() string {
+					if ongoingQueue {
+						return "Yes"
+					} else {
+						return "No"
+					}
+				}(),
+				Inline: true,
+			},
 		},
 		Footer: &discordgo.MessageEmbedFooter{
 			Text: fmt.Sprintf("Source: %s %s", cur.Artist, func() string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -24,6 +25,8 @@ type CommandHandler struct {
 	cache *cache.FileCache
 	pm    *plib.PlayerManager
 	favs  *repository.FavoritesService
+
+	ongoingSearchQueue atomic.Bool
 }
 
 func NewCommandHandler(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, pm *plib.PlayerManager, favs *repository.FavoritesService) *CommandHandler {
@@ -384,6 +387,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split)
 
+	h.ongoingSearchQueue.Store(true)
 	first := true
 	for ev := range streamCh {
 		if ev.Info != "" {
@@ -425,6 +429,8 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 			slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 		}
 	}
+
+	h.ongoingSearchQueue.Store(false)
 
 	if first {
 		h.editReply(s, i, "no songs found")
