@@ -41,6 +41,10 @@ type Player struct {
 	LoopQueue       bool
 	DisconnectTimer *time.Timer
 	LastURL         string
+
+	playCtx       context.Context
+	playCancel    context.CancelFunc
+	requestedSeek *int // absolute seek (seconds) for next Play() start
 }
 
 func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, guildID string) *Player {
@@ -154,20 +158,29 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return errors.New("queue empty")
 	}
 
-	// Resume
-	if p.Status == StatusPaused && p.NowPlaying != nil && cur.URL == p.NowPlaying.URL {
-		p.Status = StatusPlaying
-		p.startTracking(0)
-		return nil
+	// Cancel any existing playback goroutines
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
 	}
 
-	p.stopTracking()
-
-	// Prepare seek window
+	// Resolve seek window
 	var seek *int
 	var to *int
 	pos := 0
-	if cur.Offset > 0 {
+
+	// Use requested absolute seek if present; else fall back to metadata offset
+	if p.requestedSeek != nil {
+		val := *p.requestedSeek
+		seek = &val
+		// If the song has a known length, bound "to" to end (optional)
+		if cur.Length > 0 {
+			t := cur.Length + 0 // absolute end if you don’t store extra offset
+			to = &t
+		}
+		pos = val
+		p.requestedSeek = nil
+	} else if cur.Offset > 0 {
 		val := cur.Offset
 		seek = &val
 		t := cur.Length + cur.Offset
@@ -175,7 +188,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		pos = cur.Offset
 	}
 
-	// Resolve media input URL
+	// Resolve input URL
 	inputURL := ""
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
@@ -194,59 +207,88 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		}
 	}
 
-	// Start ffmpeg PCM -> we will encode to Opus (DCA framing) ourselves
-	pcm, err := stream.StartPCMStream(ctx, inputURL, seek, to)
+	// Build a playback-scoped context so we can cancel from Pause/Stop/etc.
+	playCtx, playCancel := context.WithCancel(ctx)
+	p.playCtx = playCtx
+	p.playCancel = playCancel
+
+	// Start PCM
+	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to)
 	if err != nil {
+		playCancel()
+		p.playCancel = nil
 		return err
 	}
-	// We defer Close() from within the goroutine to ensure it lasts as long as streaming
-	// defer pcm.Close()
 
-	// Create DCA encoder and pipe
 	enc, err := stream.NewDCAEncoder()
 	if err != nil {
 		pcm.Close()
+		playCancel()
+		p.playCancel = nil
 		return err
 	}
 	pr, pw := io.Pipe()
 
-	// Encode PCM -> DCA in background
+	// Encode PCM -> DCA
 	go func() {
 		defer pw.Close()
 		defer pcm.Close()
+		// Stop when playCtx is canceled by Pause/Stop/Forward/Back
+		// EncodePCMToDCA blocks on Reads; closing ffmpeg via pcm.Close() will unblock.
 		if err := enc.EncodePCMToDCA(pcm.Stdout(), pw); err != nil && err != io.EOF {
 			_ = pw.CloseWithError(err)
 		}
 	}()
 
-	// Update player state
+	// Update state
 	p.Status = StatusPlaying
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
 	p.PositionSec = pos
-	p.startTracking(pos)
+	// We will call startTracking right before we send the first packet
 
-	// Send DCA packets in background (one packet per 20ms tick)
-	go func(vc *discordgo.VoiceConnection, r io.Reader, song *SongMetadata) {
-		err := sendDCA(vc, r)
+	// Send DCA packets
+	go func(vc *discordgo.VoiceConnection, r io.Reader, song *SongMetadata, startedAt int, cancel context.CancelFunc) {
+		// ensure we stop tracking and cleanup
+		defer func() {
+			p.mu.Lock()
+			p.stopTracking()
+			p.mu.Unlock()
+		}()
 
-		// Playback finished or errored; update and advance
+		// Wrapped reader to detect first packet and start tracking
+		br := bufio.NewReader(r)
+		// small helper: read one DCA packet then unread it, to know when to start tracking
+		// We’ll reassemble in send loop to keep code simple.
+		// Instead, start tracking just before first successful send.
+		// Recreate a reader from br again in sendDCAByReader.
+
+		err := sendDCAWithTracking(vc, br, func() {
+			p.mu.Lock()
+			p.startTracking(startedAt)
+			p.mu.Unlock()
+		}, playCtx)
+
+		// After send finishes, decide next action without holding lock while calling Play/Forward/Seek
 		p.mu.Lock()
 		loopingSong := p.LoopSong && p.Status == StatusPlaying
 		loopingQueue := p.LoopQueue && p.Status == StatusPlaying && song != nil
+		// If this play was canceled (Pause/Stop/etc.), don’t auto-advance.
+		canceled := playCtx.Err() != nil
 		p.mu.Unlock()
 
+		if canceled {
+			return
+		}
 		if err != nil {
-			slog.Error("send DCA stream", "song", song.Title, "err", err)
-			_ = p.Forward(ctx, s, 1)
+			slog.Error("send DCA", "song", song.Title, "err", err)
+			_ = p.Forward(context.Background(), nil, 1)
 			return
 		}
-
 		if loopingSong {
-			_ = p.Seek(ctx, s, 0)
+			_ = p.Seek(context.Background(), nil, 0)
 			return
 		}
-
 		if loopingQueue {
 			p.mu.Lock()
 			if song != nil {
@@ -254,20 +296,23 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 			}
 			p.mu.Unlock()
 		}
-
-		_ = p.Forward(ctx, s, 1)
-	}(p.Conn, pr, cur)
+		_ = p.Forward(context.Background(), nil, 1)
+	}(p.Conn, pr, cur, pos, playCancel)
 
 	return nil
 }
 
 // sendDCA reads DCA-framed packets (uint16 len + opus packet) from r,
 // and sends exactly one opus packet every 20ms to vc.OpusSend.
-func sendDCA(vc *discordgo.VoiceConnection, r io.Reader) error {
+func sendDCAWithTracking(vc *discordgo.VoiceConnection, r io.Reader, onFirstPacket func(), ctx context.Context) error {
 	// Wait until ready
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	if vc == nil || !vc.Ready {
 		return fmt.Errorf("voice connection not ready")
@@ -280,8 +325,17 @@ func sendDCA(vc *discordgo.VoiceConnection, r io.Reader) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
+	var started bool
 	var hdr [2]byte
+
 	for {
+		// Allow cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if _, err := io.ReadFull(br, hdr[:]); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				return nil
@@ -301,8 +355,17 @@ func sendDCA(vc *discordgo.VoiceConnection, r io.Reader) error {
 			return fmt.Errorf("read dca packet: %w", err)
 		}
 
+		if !started {
+			started = true
+			if onFirstPacket != nil {
+				onFirstPacket()
+			}
+		}
+
 		<-ticker.C
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case vc.OpusSend <- packet:
 		case <-time.After(200 * time.Millisecond):
 			return fmt.Errorf("opus send timeout")
@@ -318,6 +381,10 @@ func (p *Player) Pause() error {
 	}
 	p.Status = StatusPaused
 	p.stopTracking()
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
+	}
 	return nil
 }
 
@@ -325,6 +392,10 @@ func (p *Player) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stopTracking()
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
+	}
 	p.Status = StatusIdle
 	if p.Conn != nil {
 		p.Conn.Speaking(false)
@@ -338,10 +409,15 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
+	}
+	p.stopTracking()
+
 	if p.Qpos+n-1 >= len(p.SongQueue) {
 		// queue empty, plan disconnect if configured
 		p.Status = StatusIdle
-		p.stopTracking()
 		set, _ := p.repo.GetSettings(ctx, p.guildID)
 		if set != nil && set.SecondsWaitAfterEmpty != 0 {
 			if p.DisconnectTimer != nil {
@@ -360,7 +436,6 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error
 	}
 	p.Qpos += n
 	p.PositionSec = 0
-	p.stopTracking()
 	go func() { _ = p.Play(ctx, s) }()
 	return nil
 }
@@ -368,37 +443,49 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error
 func (p *Player) Back(ctx context.Context, s *discordgo.Session) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
+	}
+	p.stopTracking()
+
 	if p.Qpos-1 < 0 {
 		return errors.New("no previous")
 	}
 	p.Qpos--
 	p.PositionSec = 0
-	p.stopTracking()
 	go func() { _ = p.Play(ctx, s) }()
 	return nil
 }
 
 func (p *Player) Seek(ctx context.Context, s *discordgo.Session, posSec int) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	cur := p.currentLocked()
 	if cur == nil {
+		p.mu.Unlock()
 		return errors.New("nothing playing")
 	}
 	if cur.IsLive {
+		p.mu.Unlock()
 		return errors.New("can't seek in live")
 	}
-	if posSec > cur.Length {
+	if cur.Length > 0 && posSec > cur.Length {
+		p.mu.Unlock()
 		return errors.New("seek past end")
 	}
+	// Set desired seek for next Play
+	p.requestedSeek = &posSec
 	p.Status = StatusPaused
 	p.stopTracking()
-	// We just restart stream with seek (Play() recomputes offset window)
+	if p.playCancel != nil {
+		p.playCancel()
+		p.playCancel = nil
+	}
 	p.mu.Unlock()
-	err := p.Play(ctx, s)
-	p.mu.Lock()
-	p.PositionSec = posSec
-	return err
+
+	// Restart playback with absolute seek
+	return p.Play(ctx, s)
 }
 
 func (p *Player) GetPosition() int {
@@ -557,9 +644,13 @@ func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
 	if p.Status == StatusPlaying {
 		return errors.New("already playing")
 	}
-	if p.currentLocked() == nil {
+	cur := p.currentLocked()
+	if cur == nil {
 		return errors.New("nothing to play")
 	}
+	// Continue from current position
+	pos := p.PositionSec
+	p.requestedSeek = &pos
 	go func() { _ = p.Play(ctx, s) }()
 	return nil
 }
