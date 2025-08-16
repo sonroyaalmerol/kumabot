@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -178,7 +179,11 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
 	} else {
-		info, err := stream.YtdlpGetInfo(ctx, p.cfg.YoutubeDLPath, "https://www.youtube.com/watch?v="+cur.URL)
+		ytURL := cur.URL
+		if !strings.HasPrefix(ytURL, "http") {
+			ytURL = "https://www.youtube.com/watch?v=" + cur.URL
+		}
+		info, err := stream.YtdlpGetInfo(ctx, p.cfg.YoutubeDLPath, ytURL)
 		if err != nil {
 			return err
 		}
