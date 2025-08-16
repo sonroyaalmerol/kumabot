@@ -7,11 +7,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	"github.com/sonroyaalmerol/kumabot/internal/handlers"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
