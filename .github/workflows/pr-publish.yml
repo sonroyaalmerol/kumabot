@@ -1,0 +1,83 @@
+name: Pull Request Publish
+on:
+  pull_request_target:
+    types:
+      - synchronize
+      - opened
+      - reopened
+    paths:
+      - '**.go'
+      - 'Dockerfile'
+      - '**.sh'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  fetch-pr-details:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.get-sha.outputs.result }}
+    steps:
+      - name: Get PR SHA
+        id: get-sha
+        uses: actions/github-script@v6
+        with:
+          result-encoding: string
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const sha = context.payload.pull_request.head.sha;
+            return sha;
+
+  build-and-push:
+    needs: fetch-pr-details
+    runs-on: ubuntu-latest
+    environment: 
+      name: pr-approval
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.fetch-pr-details.outputs.sha }}
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker - Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+          tags: type=raw,value=pr-${{ github.event.pull_request.number }}
+          flavor: latest=false
+
+      - name: Docker - Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: "https://github.com/${{ github.repository }}.git#${{ needs.fetch-pr-details.outputs.sha }}"
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Comment on Pull Request with Container Image URL
+        if: success()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: Built and pushed Docker image for PR
+          recreate: true
+          number: ${{ github.event.pull_request.number }}
+          message: |
+            The Docker image for this pull request has been built and pushed to GHCR.
+
+            Image URL: `ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number }}`

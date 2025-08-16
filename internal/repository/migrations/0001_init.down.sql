@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS file_cache;
+DROP TABLE IF EXISTS favorites;
+DROP TABLE IF EXISTS settings;
