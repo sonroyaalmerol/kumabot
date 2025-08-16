@@ -3,7 +3,6 @@ package player
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -209,24 +208,34 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	go func(vc *discordgo.VoiceConnection, st *stream.OpusStreamer, song *SongMetadata) {
 		err := stream.SendOpus(vc, st)
 		st.Close()
+
+		// Do NOT hold p.mu while calling methods that acquire p.mu themselves.
+		p.mu.Lock()
+		loopingSong := p.LoopSong && p.Status == StatusPlaying
+		loopingQueue := p.LoopQueue && p.Status == StatusPlaying && song != nil
+		p.mu.Unlock()
+
 		if err != nil {
-			slog.Error("opus send failed", "guild", p.guildID, "err", err)
+			// Move to next track, or schedule idle
 			_ = p.Forward(ctx, s, 1)
 			return
 		}
-		// On end
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.LoopSong && p.Status == StatusPlaying {
-			p.mu.Unlock()
+
+		if loopingSong {
+			// Seek to 0
 			_ = p.Seek(ctx, s, 0)
-			p.mu.Lock()
 			return
 		}
-		if p.LoopQueue && p.Status == StatusPlaying && song != nil {
-			p.SongQueue = append(p.SongQueue, *song)
+
+		if loopingQueue {
+			// Re-add current song to end of queue
+			p.mu.Lock()
+			if song != nil {
+				p.SongQueue = append(p.SongQueue, *song)
+			}
+			p.mu.Unlock()
 		}
-		p.mu.Unlock()
+
 		_ = p.Forward(ctx, s, 1)
 	}(p.Conn, streamer, cur)
 
