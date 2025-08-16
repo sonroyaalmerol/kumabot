@@ -181,13 +181,11 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	var to *int
 	pos := 0
 
-	// Use requested absolute seek if present; else fall back to metadata offset
 	if p.requestedSeek != nil {
 		val := *p.requestedSeek
 		seek = &val
-		// If the song has a known length, bound "to" to end (optional)
 		if cur.Length > 0 {
-			t := cur.Length + 0 // absolute end if you don’t store extra offset
+			t := cur.Length // absolute end if known
 			to = &t
 		}
 		pos = val
@@ -245,47 +243,37 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	go func() {
 		defer pw.Close()
 		defer pcm.Close()
-		// Stop when playCtx is canceled by Pause/Stop/Forward/Back
-		// EncodePCMToDCA blocks on Reads; closing ffmpeg via pcm.Close() will unblock.
 		if err := enc.EncodePCMToDCA(pcm.Stdout(), pw); err != nil && err != io.EOF {
 			_ = pw.CloseWithError(err)
 		}
 	}()
 
-	// Update state
+	// Update state for this song BEFORE sending packets
 	p.Status = StatusPlaying
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
-	p.PositionSec = pos
-	// We will call startTracking right before we send the first packet
+	p.PositionSec = pos // ensure PositionSec reflects starting position immediately
 
 	// Send DCA packets
 	go func(vc *discordgo.VoiceConnection, r io.Reader, song *SongMetadata, startedAt int, cancel context.CancelFunc) {
-		// ensure we stop tracking and cleanup
 		defer func() {
 			p.mu.Lock()
 			p.stopTracking()
 			p.mu.Unlock()
 		}()
 
-		// Wrapped reader to detect first packet and start tracking
 		br := bufio.NewReader(r)
-		// small helper: read one DCA packet then unread it, to know when to start tracking
-		// We’ll reassemble in send loop to keep code simple.
-		// Instead, start tracking just before first successful send.
-		// Recreate a reader from br again in sendDCAByReader.
 
 		err := sendDCAWithTracking(vc, br, func() {
 			p.mu.Lock()
+			// Start the 1Hz ticker exactly at the first packet, initialized to PositionSec set above
 			p.startTracking(startedAt)
 			p.mu.Unlock()
 		}, playCtx)
 
-		// After send finishes, decide next action without holding lock while calling Play/Forward/Seek
 		p.mu.Lock()
 		loopingSong := p.LoopSong && p.Status == StatusPlaying
 		loopingQueue := p.LoopQueue && p.Status == StatusPlaying && song != nil
-		// If this play was canceled (Pause/Stop/etc.), don’t auto-advance.
 		canceled := playCtx.Err() != nil
 		p.mu.Unlock()
 
