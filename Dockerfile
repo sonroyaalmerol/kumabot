@@ -18,6 +18,7 @@ RUN apt-get update && \
       ca-certificates \
       curl \
       tzdata \
+      python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
