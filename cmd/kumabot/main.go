@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,6 +31,8 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	slog.Info("installing dependencies", "ytdlp", "ffmpeg")
 
 	ytdlp.MustInstall(ctx, nil)
 	ytdlp.MustInstallFFprobe(ctx, nil)
