@@ -7,6 +7,13 @@ RUN go mod download
 
 COPY . .
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libopus-dev \
+      pkg-config \
+      libopusfile-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV CGO_ENABLED=1
 RUN go build -ldflags "-s -w" -o /out/kumabot ./cmd/kumabot
 
@@ -18,7 +25,8 @@ RUN apt-get update && \
       curl \
       tzdata \
       ffmpeg \
-      libopus-dev \
+      libopus0 \
+      libopusfile0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 10001 kumabot

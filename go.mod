@@ -8,7 +8,7 @@ require (
 	github.com/lrstanley/go-ytdlp v1.2.1
 	github.com/zmb3/spotify/v2 v2.4.3
 	golang.org/x/oauth2 v0.18.0
-	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32
+	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 	modernc.org/sqlite v1.18.1
 )
 
