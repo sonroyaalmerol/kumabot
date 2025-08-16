@@ -46,10 +46,10 @@ func YtdlpPlaylist(ctx context.Context, url string) ([]*YTDLPInfo, error) {
 		// Map the fields we care about into our YTDLPInfo shape.
 		out = append(out, &YTDLPInfo{
 			Id:       e.ID,
-			Title:    *e.Title,
-			Uploader: *e.Uploader,
-			Duration: int(*e.Duration),
-			IsLive:   *e.IsLive,
+			Title:    s(e.Title),
+			Uploader: s(e.Uploader),
+			Duration: f(e.Duration),
+			IsLive:   b(e.IsLive),
 		})
 	}
 
