@@ -384,7 +384,6 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split)
 
-	msg := ""
 	first := true
 	for ev := range streamCh {
 		if ev.Info != "" {
@@ -400,7 +399,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 			if first {
 				first = false
 				player.MaybeAutoplayAfterAdd(ctx, s)
-				msg = fmt.Sprintf("u betcha, %s added to the%s queue%s%s",
+				msg := fmt.Sprintf("%s added to the%s queue%s%s",
 					utils.EscapeMd(ev.Song.Title),
 					func() string {
 						if immediate {
@@ -421,6 +420,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 						return ""
 					}(),
 				)
+				h.editReply(s, i, msg)
 			}
 			slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 		}
@@ -434,8 +434,6 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	if shuffleAdd {
 		//TODO: shuffle
 	}
-
-	h.editReply(s, i, msg)
 }
 
 func (h *CommandHandler) cmdPlay(s *discordgo.Session, i *discordgo.InteractionCreate) {
