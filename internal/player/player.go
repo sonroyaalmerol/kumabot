@@ -567,3 +567,23 @@ func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
 func (p *Player) PauseCmd() error {
 	return p.Pause()
 }
+
+func (p *Player) GetQueuePage(page, pageSize int) ([]SongMetadata, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	q := p.Queue()
+	total := len(q)
+	start := (page - 1) * pageSize
+	if start >= total {
+		return []SongMetadata{}, total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return q[start:end], total
+}
