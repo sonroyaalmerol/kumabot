@@ -133,7 +133,7 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
-		Format("ba[acodec^=opus]/ba[acodec^=mp4a]/bestaudio[protocol!=m3u8][protocol!=m3u8_native][protocol!=http_dash_segments]/best").
+		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
 		DumpJSON()
 
