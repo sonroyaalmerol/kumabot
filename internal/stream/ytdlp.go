@@ -80,6 +80,7 @@ func PickMediaURL(info *YTDLPInfo) MediaURL {
 			return MediaURL{Kind: "hls", URL: f.Url}
 		}
 	}
+	ytdlpDebugf("PickMediaURL: none")
 	// Nothing viable
 	return MediaURL{}
 }

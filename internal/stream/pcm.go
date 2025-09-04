@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,18 @@ func StartPCMStream(
 		if debugOn() {
 			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening DIRECT: %s\n", inputURL)
 		}
+	}
+
+	isHLS := false
+	if strings.Contains(strings.ToLower(inputURL), ".m3u8") || strings.Contains(strings.ToLower(inputURL), "application%2fx-mpegurl") {
+		isHLS = true
+	}
+	if debugOn() {
+		kind := "DIRECT"
+		if isHLS {
+			kind = "HLS"
+		}
+		fmt.Fprintf(os.Stderr, "[stream/pcm] opening kind=%s url=%s\n", kind, inputURL)
 	}
 
 	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {
