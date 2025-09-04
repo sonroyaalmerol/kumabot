@@ -1,9 +1,8 @@
-# --- Stage 1: build Go app against distro FFmpeg 7.1 (Trixie) ---
+# --- Stage 1: build Go app against Debian Trixie FFmpeg (7.1) ---
 FROM golang:1.25-trixie AS builder
 
 WORKDIR /app
 
-# Install pkg-config and FFmpeg dev packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libavcodec-dev \
@@ -29,19 +28,18 @@ ENV CGO_ENABLED=1
 RUN go build -ldflags "-s -w" -o /out/kumabot ./cmd/kumabot
 
 
-# --- Stage 2: slim runtime with FFmpeg 7.1 shared libs from Trixie ---
+# --- Stage 2: runtime with Trixie FFmpeg libs (no manual LD paths) ---
 FROM debian:trixie-slim
 
-# Install runtime FFmpeg libs and minimal deps (no ffmpeg CLI needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
-    libavcodec60 \
-    libavformat60 \
-    libavutil58 \
-    libswresample4 \
-    libswscale7 \
-    libavfilter9 \
+    libavcodec61 \
+    libavformat61 \
+    libavutil59 \
+    libswresample5 \
+    libswscale8 \
+    libavfilter10 \
     libopus0 \
   && rm -rf /var/lib/apt/lists/*
 
