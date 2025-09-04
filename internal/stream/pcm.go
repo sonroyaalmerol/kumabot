@@ -91,8 +91,14 @@ func StartPCMStream(
 		_ = dict.Set("allowed_extensions", "ALL", 0)
 		_ = dict.Set("http_seekable", "0", 0)
 		// For DVR/live HLS, start near live edge (-1) or at beginning (0)
-		_ = dict.Set("live_start_index", "-1", 0)
+		_ = dict.Set("live_start_index", "0", 0)
 		_ = dict.Set("fflags", "nobuffer", 0)
+		_ = dict.Set("probesize", "262144", 0)        // 256k
+		_ = dict.Set("analyzeduration", "2000000", 0) // 2s
+
+		// Hint demuxer not to attempt seeking
+		_ = dict.Set("seekable", "0", 0)
+
 		// _ = d.Set("protocol_whitelist", "file,http,https,tcp,tls,crypto", 0)
 		headers := "Origin: https://www.youtube.com\r\nAccept: */*\r\nConnection: keep-alive\r\n"
 		_ = dict.Set("headers", headers, 0)
@@ -108,8 +114,9 @@ func StartPCMStream(
 	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {
 		// One-time retry with a small delay and toggled start index for HLS
 		if isHLS {
-			pcmDebugf("OpenInput failed (%v), retrying once with live_start_index=0", err)
-			_ = dict.Set("live_start_index", "0", 0)
+			pcmDebugf("OpenInput failed (%v), retrying once with live_start_index=-1", err)
+			_ = dict.Set("live_start_index", "-1", 0)
+			_ = dict.Set("analyzeduration", "4000000", 0) // 4s
 			time.Sleep(250 * time.Millisecond)
 			if err2 := fc.OpenInput(inputURL, inFmt, dict); err2 != nil {
 				fc.Free()
