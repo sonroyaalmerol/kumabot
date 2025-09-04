@@ -33,6 +33,7 @@ type PCMStreamer struct {
 	targetNbChans int
 	fifo          []byte
 	frameBytes    int
+	swrRan        bool
 }
 
 func pcmDebugf(format string, args ...any) {
@@ -407,38 +408,48 @@ func (s *PCMStreamer) initSWR(inLayout astiav.ChannelLayout) error {
 
 func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	s.dstFrame.Unref()
-	// Ensure source frame has the necessary fields set
+
+	// Ensure source frame fields
 	inRate := src.SampleRate()
 	if inRate == 0 {
 		inRate = s.decCtx.SampleRate()
 		if inRate == 0 {
-			inRate = 48000 // last resort
+			inRate = 48000
 		}
 		src.SetSampleRate(inRate)
 	}
 	inFmt := src.SampleFormat()
-	if inFmt.String() == "" || inFmt.Name() == "" {
+	if inFmt.Name() == "" {
 		inFmt = s.decCtx.SampleFormat()
-		if inFmt.String() == "" {
-			inFmt = astiav.SampleFormatS16 // fallback
+		if inFmt.Name() == "" {
+			inFmt = astiav.SampleFormatS16
 		}
 		src.SetSampleFormat(inFmt)
 	}
-	inChLayout := src.ChannelLayout()
-	if !inChLayout.Valid() || inChLayout.Channels() == 0 {
-		inChLayout = s.decCtx.ChannelLayout()
-		if !inChLayout.Valid() || inChLayout.Channels() == 0 {
-			inChLayout = astiav.ChannelLayoutStereo // fallback
+	inLayout := src.ChannelLayout()
+	if !inLayout.Valid() || inLayout.Channels() == 0 {
+		inLayout = s.decCtx.ChannelLayout()
+		if !inLayout.Valid() || inLayout.Channels() == 0 {
+			inLayout = astiav.ChannelLayoutStereo
 		}
-		src.SetChannelLayout(inChLayout)
+		src.SetChannelLayout(inLayout)
 	}
 
-	delay := s.swr.Delay(int64(inRate))
+	// Compute out samples
 	inNb := src.NbSamples()
-	outSamples := int(((delay+int64(inNb))*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
+	var outSamples int
+	if s.swrRan {
+		// Safe to use delay after at least one successful convert
+		delay := s.swr.Delay(int64(inRate))
+		outSamples = int(((delay+int64(inNb))*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
+	} else {
+		// First call: use simple rescale without delay
+		outSamples = int((int64(inNb)*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
+	}
 	if outSamples <= 0 {
 		outSamples = 1
 	}
+
 	s.dstFrame.SetNbSamples(outSamples)
 	s.dstFrame.SetChannelLayout(s.targetLayout)
 	s.dstFrame.SetSampleRate(s.targetRate)
@@ -447,32 +458,25 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		return fmt.Errorf("dst alloc buffer: %w", err)
 	}
 
+	// Convert (auto-inits SWR on first call based on src/dst)
 	if err := s.swr.ConvertFrame(src, s.dstFrame); err != nil {
 		return fmt.Errorf("swr convert: %w", err)
 	}
+	s.swrRan = true
 
+	// Optional sanity check
 	if s.dstFrame.SampleFormat() != astiav.SampleFormatS16 ||
 		s.dstFrame.ChannelLayout().Channels() != 2 ||
 		s.dstFrame.SampleRate() != 48000 {
-		pcmDebugf("unexpected dst params fmt=%s ch=%d sr=%d",
+		return fmt.Errorf("unexpected dst params fmt=%s ch=%d sr=%d",
 			s.dstFrame.SampleFormat().String(),
 			s.dstFrame.ChannelLayout().Channels(),
 			s.dstFrame.SampleRate())
 	}
 
-	// Get interleaved bytes from dst frame
 	b, err := s.dstFrame.Data().Bytes(0)
 	if err != nil {
 		return fmt.Errorf("dst bytes: %w", err)
-	}
-	if debugOn() {
-		// reuse encoder’s helper or copy here
-		var sum float64
-		for i := 0; i+1 < len(b); i += 2 {
-			v := int16(uint16(b[i]) | (uint16(b[i+1]) << 8))
-			sum += float64(v) * float64(v)
-		}
-		pcmDebugf("resampled bytes=%d mean-square=%f", len(b), sum/float64(len(b)/2))
 	}
 	_, err = s.pw.Write(b)
 	return err
@@ -480,6 +484,9 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 
 // drainSWR flushes remaining samples after EOF
 func (s *PCMStreamer) drainSWR() error {
+	if !s.swrRan {
+		return nil
+	}
 	inRate := s.decCtx.SampleRate()
 	if inRate == 0 {
 		inRate = 48000
