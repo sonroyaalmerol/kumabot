@@ -35,6 +35,12 @@ type PCMStreamer struct {
 	frameBytes    int
 }
 
+func pcmDebugf(format string, args ...any) {
+	if debugOn() {
+		_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] "+format+"\n", args...)
+	}
+}
+
 // StartPCMStream opens inputURL, optionally seeks/trims, and produces raw s16le
 // stereo 48k PCM on the returned stream's Stdout() reader.
 func StartPCMStream(
@@ -65,6 +71,8 @@ func StartPCMStream(
 	_ = dict.Set("reconnect_streamed", "1", 0)
 	_ = dict.Set("reconnect_delay_max", "5", 0)
 	_ = dict.Set("rw_timeout", "15000000", 0)
+	_ = dict.Set("http_persistent", "1", 0)
+	_ = dict.Set("http_multiple", "0", 0)
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
@@ -84,7 +92,10 @@ func StartPCMStream(
 		_ = dict.Set("http_seekable", "0", 0)
 		// For DVR/live HLS, start near live edge (-1) or at beginning (0)
 		_ = dict.Set("live_start_index", "-1", 0)
+		_ = dict.Set("fflags", "nobuffer", 0)
 		// _ = d.Set("protocol_whitelist", "file,http,https,tcp,tls,crypto", 0)
+		headers := "Origin: https://www.youtube.com\r\nAccept: */*\r\nConnection: keep-alive\r\n"
+		_ = dict.Set("headers", headers, 0)
 		if debugOn() {
 			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening HLS: %s\n", inputURL)
 		}
@@ -95,8 +106,19 @@ func StartPCMStream(
 	}
 
 	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {
-		fc.Free()
-		return nil, fmt.Errorf("open input: %w", err)
+		// One-time retry with a small delay and toggled start index for HLS
+		if isHLS {
+			pcmDebugf("OpenInput failed (%v), retrying once with live_start_index=0", err)
+			_ = dict.Set("live_start_index", "0", 0)
+			time.Sleep(250 * time.Millisecond)
+			if err2 := fc.OpenInput(inputURL, inFmt, dict); err2 != nil {
+				fc.Free()
+				return nil, fmt.Errorf("open input retry failed: %w (first: %v)", err2, err)
+			}
+		} else {
+			fc.Free()
+			return nil, fmt.Errorf("open input: %w", err)
+		}
 	}
 
 	if err := fc.FindStreamInfo(nil); err != nil {
@@ -115,6 +137,7 @@ func StartPCMStream(
 		}
 		return nil, errors.New("no audio stream found")
 	}
+	pcmDebugf("best audio stream index=%d codec=%s tb=%s", st.Index(), codec.Name(), st.TimeBase().String())
 
 	decCtx := astiav.AllocCodecContext(codec)
 	if decCtx == nil {
