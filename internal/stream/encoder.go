@@ -30,6 +30,23 @@ func dprintf(format string, args ...any) {
 	}
 }
 
+func pcmRMS16LE(b []byte) float64 {
+	if len(b)%2 != 0 {
+		return 0
+	}
+	var sum float64
+	cnt := 0
+	for i := 0; i < len(b); i += 2 {
+		v := int16(uint16(b[i]) | (uint16(b[i+1]) << 8))
+		sum += float64(v) * float64(v)
+		cnt++
+	}
+	if cnt == 0 {
+		return 0
+	}
+	return sum / float64(cnt) // mean square (no sqrt needed for debug)
+}
+
 // NewEncoder creates an Opus encoder (libopus) at 48k stereo ~160kbps.
 func NewEncoder() (*Encoder, error) {
 	const (
@@ -53,7 +70,13 @@ func NewEncoder() (*Encoder, error) {
 	cc.SetSampleFormat(astiav.SampleFormatS16)
 	cc.SetBitRate(160_000)
 
-	if err := cc.Open(codec, nil); err != nil {
+	opts := astiav.NewDictionary()
+	defer opts.Free()
+	_ = opts.Set("vbr", "off", 0)           // debug: force CBR-like behavior to avoid DTX
+	_ = opts.Set("application", "audio", 0) // better for music/general audio
+	_ = opts.Set("compression_level", "8", 0)
+
+	if err := cc.Open(codec, opts); err != nil {
 		cc.Free()
 		return nil, fmt.Errorf("open opus encoder: %w", err)
 	}
@@ -117,6 +140,10 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 
 	if err := e.frame.Data().SetBytes(pcm, 0); err != nil {
 		return fmt.Errorf("frame set bytes: %w", err)
+	}
+	if debugOn() {
+		ms := pcmRMS16LE(pcm)
+		dprintf("frame PCM mean-square=%f", ms)
 	}
 	if err := e.cc.SendFrame(e.frame); err != nil {
 		return fmt.Errorf("send frame: %w", err)

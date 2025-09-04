@@ -434,10 +434,28 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		return fmt.Errorf("swr convert: %w", err)
 	}
 
+	if s.dstFrame.SampleFormat() != astiav.SampleFormatS16 ||
+		s.dstFrame.ChannelLayout().Channels() != 2 ||
+		s.dstFrame.SampleRate() != 48000 {
+		pcmDebugf("unexpected dst params fmt=%s ch=%d sr=%d",
+			s.dstFrame.SampleFormat().String(),
+			s.dstFrame.ChannelLayout().Channels(),
+			s.dstFrame.SampleRate())
+	}
+
 	// Get interleaved bytes from dst frame
 	b, err := s.dstFrame.Data().Bytes(0)
 	if err != nil {
 		return fmt.Errorf("dst bytes: %w", err)
+	}
+	if debugOn() {
+		// reuse encoder’s helper or copy here
+		var sum float64
+		for i := 0; i+1 < len(b); i += 2 {
+			v := int16(uint16(b[i]) | (uint16(b[i+1]) << 8))
+			sum += float64(v) * float64(v)
+		}
+		pcmDebugf("resampled bytes=%d mean-square=%f", len(b), sum/float64(len(b)/2))
 	}
 	_, err = s.pw.Write(b)
 	return err
