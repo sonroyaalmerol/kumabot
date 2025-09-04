@@ -183,16 +183,18 @@ func StartPCMStream(
 	// Set input params
 	inLayout := decCtx.ChannelLayout()
 	if !inLayout.Valid() || inLayout.Channels() == 0 {
-		// Some codecs don't set layout; derive from channels if needed
-		// Fallback: use default layout for channel count
-		switch decCtx.Channels() {
+		// Fall back to channel count from stream codec parameters
+		ch := 0
+		if p := st.CodecParameters(); p != nil {
+			ch = p.Channels()
+		}
+		switch ch {
 		case 1:
 			inLayout = astiav.ChannelLayoutMono
 		case 2:
 			inLayout = astiav.ChannelLayoutStereo
 		default:
-			// Let SWR infer from channel count; layout compare may still be OK
-			inLayout = decCtx.ChannelLayout{}
+			inLayout = astiav.ChannelLayout{}
 		}
 	}
 	// SWR options are set via Options() on its Class; but go-astiav exposes a simpler API:
@@ -407,45 +409,37 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 }
 
 func (s *PCMStreamer) initSWR(inLayout astiav.ChannelLayout) error {
-	// Explicitly configure SWR input/output params and init
-	inFmt := s.decCtx.SampleFormat()
+	// Configure SWR via its Options
 	inRate := s.decCtx.SampleRate()
 	inChLayout := inLayout
 	if !inChLayout.Valid() || inChLayout.Channels() == 0 {
-		// As a last resort, build from channels
-		switch s.decCtx.Channels() {
+		ch := 0
+		if s.audioStream != nil && s.audioStream.CodecParameters() != nil {
+			ch = s.audioStream.CodecParameters().Channels()
+		}
+		switch ch {
 		case 1:
 			inChLayout = astiav.ChannelLayoutMono
 		case 2:
 			inChLayout = astiav.ChannelLayoutStereo
+		default:
+			inChLayout = astiav.ChannelLayout{}
 		}
 	}
 
-	if err := s.swr.SetChannelLayout(astiav.DirectionInput, inChLayout); err != nil {
-		return fmt.Errorf("swr set in ch layout: %w", err)
-	}
-	if err := s.swr.SetSampleRate(astiav.DirectionInput, inRate); err != nil {
-		return fmt.Errorf("swr set in rate: %w", err)
-	}
-	if err := s.swr.SetSampleFormat(astiav.DirectionInput, inFmt); err != nil {
-		return fmt.Errorf("swr set in fmt: %w", err)
+	if cls := s.swr.Class(); cls != nil {
+		opts := cls.Options()
+		// Note: Set expects string values; use .String() / fmt.Sprintf
+		_ = opts.Set("in_channel_layout", inChLayout.String(), 0)
+		_ = opts.Set("in_sample_rate", fmt.Sprintf("%d", inRate), 0)
+		_ = opts.Set("in_sample_fmt", s.decCtx.SampleFormat().Name(), 0)
+
+		_ = opts.Set("out_channel_layout", s.targetLayout.String(), 0)
+		_ = opts.Set("out_sample_rate", fmt.Sprintf("%d", s.targetRate), 0)
+		_ = opts.Set("out_sample_fmt", s.targetFormat.Name(), 0)
 	}
 
-	if err := s.swr.SetChannelLayout(astiav.DirectionOutput, s.targetLayout); err != nil {
-		return fmt.Errorf("swr set out ch layout: %w", err)
-	}
-	if err := s.swr.SetSampleRate(astiav.DirectionOutput, s.targetRate); err != nil {
-		return fmt.Errorf("swr set out rate: %w", err)
-	}
-	if err := s.swr.SetSampleFormat(astiav.DirectionOutput, s.targetFormat); err != nil {
-		return fmt.Errorf("swr set out fmt: %w", err)
-	}
-
-	if err := s.swr.Init(); err != nil {
-		return fmt.Errorf("swr init: %w", err)
-	}
-
-	// Prepare dst frame static params (nb_samples will be set per call)
+	// Prepare static dst frame params; nb_samples will be set per conversion
 	s.dstFrame.SetChannelLayout(s.targetLayout)
 	s.dstFrame.SetSampleRate(s.targetRate)
 	s.dstFrame.SetSampleFormat(s.targetFormat)
@@ -455,11 +449,9 @@ func (s *PCMStreamer) initSWR(inLayout astiav.ChannelLayout) error {
 func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	s.dstFrame.Unref()
 	inRate := s.decCtx.SampleRate()
-	// Compute how many output samples to allocate this call:
-	// out_samples = ceil((delay + in_nb) * out_rate / in_rate)
-	delay := s.swr.GetDelay(inRate)
+	delay := s.swr.Delay(int64(inRate))
 	inNb := src.NbSamples()
-	outSamples := int(((int64(delay)+int64(inNb))*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
+	outSamples := int(((delay+int64(inNb))*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
 	if outSamples <= 0 {
 		outSamples = 1
 	}
@@ -504,18 +496,17 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 
 // drainSWR flushes remaining samples after EOF
 func (s *PCMStreamer) drainSWR() error {
+	inRate := s.decCtx.SampleRate()
 	for {
-		s.dstFrame.Unref()
-		// Ask SWR how many remain
-		inRate := s.decCtx.SampleRate()
-		delay := s.swr.GetDelay(inRate)
-		if delay <= 0 {
+		d := s.swr.Delay(int64(inRate))
+		if d <= 0 {
 			return nil
 		}
-		outSamples := int((int64(delay)*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
+		outSamples := int((d*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
 		if outSamples <= 0 {
 			return nil
 		}
+		s.dstFrame.Unref()
 		s.dstFrame.SetNbSamples(outSamples)
 		s.dstFrame.SetChannelLayout(s.targetLayout)
 		s.dstFrame.SetSampleRate(s.targetRate)
