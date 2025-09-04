@@ -3,9 +3,7 @@ package player
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -406,77 +404,6 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	}(p.Conn, pos, playCancel)
 
 	return nil
-}
-
-// sendDCA reads DCA-framed packets (uint16 len + opus packet) from r,
-// and sends exactly one opus packet every 20ms to vc.OpusSend.
-func sendDCAWithTracking(vc *discordgo.VoiceConnection, r io.Reader, onFirstPacket func(), ctx context.Context) error {
-	// Wait until ready
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	if vc == nil || !vc.Ready {
-		return fmt.Errorf("voice connection not ready")
-	}
-
-	_ = vc.Speaking(true)
-	defer vc.Speaking(false)
-
-	br := bufio.NewReaderSize(r, 32*1024)
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-
-	var started bool
-	var hdr [2]byte
-
-	for {
-		// Allow cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if _, err := io.ReadFull(br, hdr[:]); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				return nil
-			}
-			return fmt.Errorf("read dca len: %w", err)
-		}
-		n := binary.LittleEndian.Uint16(hdr[:])
-		if n == 0 {
-			<-ticker.C
-			continue
-		}
-		packet := make([]byte, int(n))
-		if _, err := io.ReadFull(br, packet); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				return nil
-			}
-			return fmt.Errorf("read dca packet: %w", err)
-		}
-
-		if !started {
-			started = true
-			if onFirstPacket != nil {
-				onFirstPacket()
-			}
-		}
-
-		<-ticker.C
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case vc.OpusSend <- packet:
-		case <-time.After(200 * time.Millisecond):
-			return fmt.Errorf("opus send timeout")
-		}
-	}
 }
 
 func (p *Player) Pause() error {
