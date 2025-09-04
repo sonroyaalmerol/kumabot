@@ -5,6 +5,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
+    libavdevice-dev \
     libavcodec-dev \
     libavformat-dev \
     libavutil-dev \
@@ -40,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libswresample5 \
     libswscale8 \
     libavfilter10 \
+    libavdevice61 \
     libopus0 \
   && rm -rf /var/lib/apt/lists/*
 
