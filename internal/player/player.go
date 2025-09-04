@@ -230,20 +230,24 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
-	enc, err := stream.NewDCAEncoder()
+	// Pipe that will carry DCA packets to the Discord sender goroutine
+	pr, pw := io.Pipe()
+
+	// Create DCA encoder that writes to the pipe writer
+	enc, err := stream.NewDCAEncoder(pw)
 	if err != nil {
 		pcm.Close()
 		playCancel()
 		p.playCancel = nil
 		return err
 	}
-	pr, pw := io.Pipe()
 
-	// Encode PCM -> DCA
+	// Encode PCM -> DCA in background
 	go func() {
 		defer pw.Close()
 		defer pcm.Close()
-		if err := enc.EncodePCMToDCA(pcm.Stdout(), pw); err != nil && err != io.EOF {
+		defer enc.Close()
+		if err := enc.EncodePCMToDCA(pcm.Stdout()); err != nil && err != io.EOF {
 			_ = pw.CloseWithError(err)
 		}
 	}()

@@ -3,17 +3,18 @@ module github.com/sonroyaalmerol/kumabot
 go 1.25.0
 
 require (
+	github.com/asticode/go-astiav v0.38.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/golang-migrate/migrate/v4 v4.18.3
 	github.com/lrstanley/go-ytdlp v1.2.1
 	github.com/zmb3/spotify/v2 v2.4.3
 	golang.org/x/oauth2 v0.18.0
-	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 	modernc.org/sqlite v1.18.1
 )
 
 require (
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
+	github.com/asticode/go-astikit v0.42.0 // indirect
 	github.com/cloudflare/circl v1.6.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
