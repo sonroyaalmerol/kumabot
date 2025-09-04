@@ -210,9 +210,10 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		if err != nil {
 			return err
 		}
-		inputURL = stream.YtdlpAudioURL(info)
-		if inputURL == "" {
-			return errors.New("no audio URL")
+
+		mu := stream.PickMediaURL(info)
+		if mu.URL == "" {
+			return errors.New("no usable media URL (direct or HLS)")
 		}
 	}
 

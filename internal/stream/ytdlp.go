@@ -52,6 +52,38 @@ type YTDLPInfo struct {
 	Entries []YTDLPEntry `json:"entries"`
 }
 
+type MediaURL struct {
+	Kind string // "direct" or "hls"
+	URL  string
+}
+
+func PickMediaURL(info *YTDLPInfo) MediaURL {
+	// Try direct first
+	if u := YtdlpAudioURL(info); u != "" && !isManifestURL(u) {
+		return MediaURL{Kind: "direct", URL: u}
+	}
+	// If not found, allow manifest as HLS fallback
+	for _, rf := range info.RequestedFormats {
+		if strings.HasPrefix(rf.Url, "http") && isManifestURL(rf.Url) {
+			ytdlpDebugf("HLS fallback using requested_format: %s", rf.Url)
+			return MediaURL{Kind: "hls", URL: rf.Url}
+		}
+	}
+	if strings.HasPrefix(info.Url, "http") && isManifestURL(info.Url) {
+		ytdlpDebugf("HLS fallback using top-level URL: %s", info.Url)
+		return MediaURL{Kind: "hls", URL: info.Url}
+	}
+	// Formats list
+	for _, f := range info.Formats {
+		if strings.HasPrefix(f.Url, "http") && isManifestURL(f.Url) {
+			ytdlpDebugf("HLS fallback using formats[]: %s", f.Url)
+			return MediaURL{Kind: "hls", URL: f.Url}
+		}
+	}
+	// Nothing viable
+	return MediaURL{}
+}
+
 var (
 	installOnce sync.Once
 )

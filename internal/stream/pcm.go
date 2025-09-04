@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -56,13 +57,26 @@ func StartPCMStream(
 	_ = dict.Set("reconnect_streamed", "1", 0)
 	_ = dict.Set("reconnect_delay_max", "5", 0)
 
-	// Pre-input seek: best effort for formats supporting it
-	if seek != nil && *seek > 0 {
-		// For input options, prefer "start_time" or "seekable" demuxer options if any.
-		// Many demuxers ignore this; we'll also perform an actual SeekFrame later.
+	var inFmt *astiav.InputFormat
+	if isManifestURL(inputURL) {
+		// HLS-specific
+		inFmt = astiav.FindInputFormat("hls")
+		// Help the HLS demuxer accept nonstandard extensions and URL forms
+		_ = dict.Set("allowed_extensions", "ALL", 0)
+		_ = dict.Set("http_seekable", "0", 0)
+		// For DVR/live HLS, start near live edge (-1) or at beginning (0)
+		_ = dict.Set("live_start_index", "-1", 0)
+		// _ = d.Set("protocol_whitelist", "file,http,https,tcp,tls,crypto", 0)
+		if debugOn() {
+			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening HLS: %s\n", inputURL)
+		}
+	} else {
+		if debugOn() {
+			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening DIRECT: %s\n", inputURL)
+		}
 	}
 
-	if err := fc.OpenInput(inputURL, nil, dict); err != nil {
+	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {
 		fc.Free()
 		return nil, fmt.Errorf("open input: %w", err)
 	}
