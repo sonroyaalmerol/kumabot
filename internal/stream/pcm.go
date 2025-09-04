@@ -47,30 +47,24 @@ func StartPCMStream(
 		return nil, errors.New("alloc format context")
 	}
 
-	d := astiav.NewDictionary()
-	defer d.Free()
+	// Handle reconnect and input options similar to CLI
+	dict := astiav.NewDictionary()
+	defer dict.Free()
+	_ = dict.Set("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", 0)
+	_ = dict.Set("referer", "https://www.youtube.com/", 0)
+	_ = dict.Set("reconnect", "1", 0)
+	_ = dict.Set("reconnect_streamed", "1", 0)
+	_ = dict.Set("reconnect_delay_max", "5", 0)
 
-	// HTTP robustness
-	_ = d.Set("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", 0)
-	_ = d.Set("referer", "https://www.youtube.com/", 0)
-	_ = d.Set("http_persistent", "1", 0)
-	_ = d.Set("reconnect", "1", 0)
-	_ = d.Set("reconnect_streamed", "1", 0)
-	_ = d.Set("reconnect_delay_max", "5", 0)
+	// Pre-input seek: best effort for formats supporting it
+	if seek != nil && *seek > 0 {
+		// For input options, prefer "start_time" or "seekable" demuxer options if any.
+		// Many demuxers ignore this; we'll also perform an actual SeekFrame later.
+	}
 
-	// HLS-specific options. Use input format "hls"
-	_ = d.Set("allowed_extensions", "ALL", 0) // allow aac in TS with .ts path quirks
-	_ = d.Set("live_start_index", "-1", 0)    // start near live edge for DVR (or "0" to start at beginning)
-	_ = d.Set("http_seekable", "0", 0)        // sometimes helps with chunked transfer
-
-	// _ = d.Set("protocol_whitelist", "file,http,https,tcp,tls,crypto", 0)
-
-	hlsFmt := astiav.FindInputFormat("hls")
-	if err := fc.OpenInput(inputURL, hlsFmt, d); err != nil {
-		// fallback: try without format pin
-		if err2 := fc.OpenInput(inputURL, nil, d); err2 != nil {
-			return nil, fmt.Errorf("open input: %w (fallback: %v)", err, err2)
-		}
+	if err := fc.OpenInput(inputURL, nil, dict); err != nil {
+		fc.Free()
+		return nil, fmt.Errorf("open input: %w", err)
 	}
 
 	if err := fc.FindStreamInfo(nil); err != nil {

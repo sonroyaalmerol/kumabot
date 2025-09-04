@@ -134,7 +134,8 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 	})
 
 	cmd := ytdlp.New().
-		Format("bestaudio/best").
+		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
+		NoCheckCertificates().
 		DumpJSON()
 
 	res, err := cmd.Run(ctx, url)
