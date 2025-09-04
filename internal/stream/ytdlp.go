@@ -181,7 +181,7 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
-		Format("ba[acodec^=opus]/ba[acodec^=mp4a]/bestaudio[protocol!=m3u8][protocol!=m3u8_native][protocol!=http_dash_segments]/best").
+		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
 		DumpJSON()
 
@@ -296,75 +296,4 @@ func isLikelyMediaURL(u string) bool {
 	}
 	// Some direct audio URLs lack extensions; accept as fallback if not manifest
 	return !isManifestURL(lu)
-}
-
-// YtdlpAudioURL returns the best playable URL, preferring direct audio streams.
-func YtdlpAudioURL(info *YTDLPInfo) string {
-	pick := func(u, tag string) string {
-		if isLikelyMediaURL(u) && !isManifestURL(u) {
-			ytdlpDebugf("selected %s URL: %s", tag, u)
-			return u
-		}
-		if debugOn() && strings.HasPrefix(u, "http") {
-			ytdlpDebugf("skipping %s URL: %s", tag, u)
-		}
-		return ""
-	}
-
-	// 1) requested_formats
-	if len(info.RequestedFormats) > 0 {
-		for _, rf := range info.RequestedFormats {
-			if u := pick(rf.Url, "requested_format"); u != "" {
-				return u
-			}
-		}
-	}
-
-	// 2) top-level
-	if u := pick(info.Url, "top-level"); u != "" {
-		return u
-	}
-
-	// 3) formats: prefer webm/opus then m4a/aac, else any likely media
-	var webm, m4a, any string
-	for _, f := range info.Formats {
-		u := f.Url
-		if !isLikelyMediaURL(u) || isManifestURL(u) {
-			continue
-		}
-		lu := strings.ToLower(u)
-		switch {
-		case strings.Contains(lu, ".webm") || strings.Contains(lu, "audio/webm") || strings.Contains(lu, "opus"):
-			if webm == "" {
-				webm = u
-			}
-		case strings.Contains(lu, ".m4a") || strings.Contains(lu, "audio/mp4") || strings.Contains(lu, "aac") || strings.Contains(lu, "mp4a"):
-			if m4a == "" {
-				m4a = u
-			}
-		default:
-			if any == "" {
-				any = u
-			}
-		}
-	}
-	if webm != "" {
-		ytdlpDebugf("selected formats (webm/opus): %s", webm)
-		return webm
-	}
-	if m4a != "" {
-		ytdlpDebugf("selected formats (m4a/aac): %s", m4a)
-		return m4a
-	}
-	if any != "" {
-		ytdlpDebugf("selected formats (any): %s", any)
-		return any
-	}
-
-	if info.WebpageUrl != "" {
-		ytdlpDebugf("falling back to webpage URL: %s", info.WebpageUrl)
-		return info.WebpageUrl
-	}
-	ytdlpDebugf("no usable URL found")
-	return ""
 }
