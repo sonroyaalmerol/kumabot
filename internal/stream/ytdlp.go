@@ -57,24 +57,47 @@ type MediaURL struct {
 	URL  string
 }
 
-func PickDirectURL(info *YTDLPInfo) string {
-	// 1) requested_formats
+func PickMediaURL(info *YTDLPInfo) MediaURL {
+	// 1) prefer direct (requested -> top-level -> formats)
 	for _, rf := range info.RequestedFormats {
-		if isDirectAudioURL(rf.Url) {
-			return rf.Url
+		u := rf.Url
+		if strings.HasPrefix(u, "http") && !isManifestURL(u) && isLikelyMediaURL(u) {
+			ytdlpDebugf("PickMediaURL: DIRECT requested %s", u)
+			return MediaURL{Kind: "direct", URL: u}
 		}
 	}
-	// 2) top-level
-	if isDirectAudioURL(info.Url) {
-		return info.Url
+	if strings.HasPrefix(info.Url, "http") && !isManifestURL(info.Url) && isLikelyMediaURL(info.Url) {
+		ytdlpDebugf("PickMediaURL: DIRECT top-level %s", info.Url)
+		return MediaURL{Kind: "direct", URL: info.Url}
 	}
-	// 3) formats
 	for _, f := range info.Formats {
-		if isDirectAudioURL(f.Url) {
-			return f.Url
+		u := f.Url
+		if strings.HasPrefix(u, "http") && !isManifestURL(u) && isLikelyMediaURL(u) {
+			ytdlpDebugf("PickMediaURL: DIRECT formats %s", u)
+			return MediaURL{Kind: "direct", URL: u}
 		}
 	}
-	return ""
+	// 2) HLS fallback (requested -> top-level -> formats)
+	for _, rf := range info.RequestedFormats {
+		u := rf.Url
+		if strings.HasPrefix(u, "http") && isManifestURL(u) {
+			ytdlpDebugf("PickMediaURL: HLS requested %s", u)
+			return MediaURL{Kind: "hls", URL: u}
+		}
+	}
+	if strings.HasPrefix(info.Url, "http") && isManifestURL(info.Url) {
+		ytdlpDebugf("PickMediaURL: HLS top-level %s", info.Url)
+		return MediaURL{Kind: "hls", URL: info.Url}
+	}
+	for _, f := range info.Formats {
+		u := f.Url
+		if strings.HasPrefix(u, "http") && isManifestURL(u) {
+			ytdlpDebugf("PickMediaURL: HLS formats %s", u)
+			return MediaURL{Kind: "hls", URL: u}
+		}
+	}
+	ytdlpDebugf("PickMediaURL: none")
+	return MediaURL{}
 }
 
 var (
@@ -158,9 +181,7 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
-		Format("ba[acodec^=opus][protocol!=m3u8][protocol!=m3u8_native][protocol!=http_dash_segments]/" +
-			"ba[acodec^=mp4a][protocol!=m3u8][protocol!=m3u8_native][protocol!=http_dash_segments]/" +
-			"bestaudio[protocol!=m3u8][protocol!=m3u8_native][protocol!=http_dash_segments]/best").
+		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
 		DumpJSON()
 
@@ -256,14 +277,23 @@ func isManifestURL(u string) bool {
 		strings.Contains(us, "application/dash+xml")
 }
 
-func isDirectAudioURL(u string) bool {
-	if !strings.HasPrefix(u, "http") || isManifestURL(u) {
+func isLikelyMediaURL(u string) bool {
+	if u == "" || !strings.HasPrefix(u, "http") {
 		return false
 	}
 	lu := strings.ToLower(u)
-	return strings.Contains(lu, "mime=audio%2fwebm") ||
-		strings.Contains(lu, "audio/webm") ||
-		strings.Contains(lu, "mime=audio%2fmp4") ||
-		strings.Contains(lu, "audio/mp4") ||
-		strings.Contains(lu, "opus") || strings.Contains(lu, "mp4a")
+	// Reject known thumbnail/static domains and extensions
+	if strings.Contains(lu, "i.ytimg.com") ||
+		strings.Contains(lu, "googleusercontent.com") {
+		return false
+	}
+	// Favor typical audio media hints
+	if strings.Contains(lu, ".webm") || strings.Contains(lu, "audio/webm") ||
+		strings.Contains(lu, ".m4a") || strings.Contains(lu, "audio/mp4") ||
+		strings.Contains(lu, "opus") || strings.Contains(lu, "aac") ||
+		strings.Contains(lu, "mp4a") {
+		return true
+	}
+	// Some direct audio URLs lack extensions; accept as fallback if not manifest
+	return !isManifestURL(lu)
 }
