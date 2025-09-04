@@ -215,6 +215,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		if mu.URL == "" {
 			return errors.New("no usable media URL (direct or HLS)")
 		}
+		inputURL = mu.URL
 	}
 
 	// Build a playback-scoped context so we can cancel from Pause/Stop/etc.
