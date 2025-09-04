@@ -3,6 +3,7 @@ package stream
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/asticode/go-astiav"
 )
@@ -18,6 +19,17 @@ type Encoder struct {
 	frameSize  int // samples per channel for 20 ms at 48 kHz = 960
 }
 
+func debugOn() bool {
+	v := os.Getenv("DEBUG")
+	return v == "1" || v == "true" || v == "TRUE"
+}
+
+func dprintf(format string, args ...any) {
+	if debugOn() {
+		_, _ = fmt.Fprintf(os.Stderr, "[stream/encoder] "+format+"\n", args...)
+	}
+}
+
 // NewEncoder creates an Opus encoder (libopus) at 48k stereo ~160kbps.
 func NewEncoder() (*Encoder, error) {
 	const (
@@ -30,6 +42,8 @@ func NewEncoder() (*Encoder, error) {
 	if codec == nil {
 		return nil, errors.New("libopus encoder not found")
 	}
+	dprintf("using codec=%s (decoder=%v encoder=%v)", codec.Name(), codec.IsDecoder(), codec.IsEncoder())
+
 	cc := astiav.AllocCodecContext(codec)
 	if cc == nil {
 		return nil, errors.New("alloc codec context")
@@ -43,6 +57,8 @@ func NewEncoder() (*Encoder, error) {
 		cc.Free()
 		return nil, fmt.Errorf("open opus encoder: %w", err)
 	}
+	dprintf("opened encoder: sr=%d ch=%d fmt=%s bitrate=%d",
+		cc.SampleRate(), cc.ChannelLayout().Channels(), cc.SampleFormat().String(), cc.BitRate())
 
 	frame := astiav.AllocFrame()
 	if frame == nil {
@@ -58,6 +74,8 @@ func NewEncoder() (*Encoder, error) {
 		cc.Free()
 		return nil, fmt.Errorf("frame alloc buffer: %w", err)
 	}
+	dprintf("prepared frame buffer: nb_samples=%d bytes_per_frame=%d",
+		frameSize, frameSize*channels*2)
 
 	pkt := astiav.AllocPacket()
 	if pkt == nil {
@@ -77,6 +95,7 @@ func NewEncoder() (*Encoder, error) {
 }
 
 func (e *Encoder) Close() {
+	dprintf("closing encoder")
 	if e.packet != nil {
 		e.packet.Free()
 	}
@@ -91,19 +110,18 @@ func (e *Encoder) Close() {
 // EncodeFrame expects interleaved s16le PCM for exactly 960 samples/ch (20 ms).
 // pcm length must be 960 * channels * 2 bytes = 3840 bytes.
 func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
-	if len(pcm) != e.frameSize*e.channels*2 {
-		return fmt.Errorf("pcm must be %d bytes, got %d",
-			e.frameSize*e.channels*2, len(pcm))
+	expected := e.frameSize * e.channels * 2
+	if len(pcm) != expected {
+		return fmt.Errorf("pcm must be %d bytes, got %d", expected, len(pcm))
 	}
 
-	// Put PCM into frame (no copy API copies into AVFrame buffer)
 	if err := e.frame.Data().SetBytes(pcm, 0); err != nil {
 		return fmt.Errorf("frame set bytes: %w", err)
 	}
-
 	if err := e.cc.SendFrame(e.frame); err != nil {
 		return fmt.Errorf("send frame: %w", err)
 	}
+	dprintf("sent frame: bytes=%d", len(pcm))
 
 	for {
 		e.packet.Unref()
@@ -113,7 +131,7 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 			}
 			return fmt.Errorf("receive packet: %w", err)
 		}
-		// Pass raw Opus payload
+		dprintf("got opus packet: size=%d", e.packet.Size())
 		if err := onPacket(e.packet.Data()); err != nil {
 			return err
 		}
@@ -122,6 +140,7 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 }
 
 func (e *Encoder) Flush(onPacket OpusPacketHandler) error {
+	dprintf("flushing encoder")
 	if err := e.cc.SendFrame(nil); err != nil {
 		if astErr, ok := err.(astiav.Error); ok && astErr.Is(astiav.ErrEof) {
 			return nil
@@ -135,6 +154,7 @@ func (e *Encoder) Flush(onPacket OpusPacketHandler) error {
 			}
 			return err
 		}
+		dprintf("flush packet: size=%d", e.packet.Size())
 		if err := onPacket(e.packet.Data()); err != nil {
 			return err
 		}

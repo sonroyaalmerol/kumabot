@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -121,23 +122,22 @@ func mapReqFormats(fs []*ytdlp.ExtractedFormat) []YTDLPRequestedFormat {
 	return out
 }
 
+func ytdlpDebugf(format string, args ...any) {
+	if debugOn() {
+		_, _ = fmt.Fprintf(os.Stderr, "[stream/ytdlp] "+format+"\n", args...)
+	}
+}
+
 // YtdlpGetInfo runs yt-dlp -J -f bestaudio/best URL.
 func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
-	// Ensure yt-dlp is installed once
-	installOnce.Do(func() {
-		// ignore error here; cmd.Run will surface availability issues
-		// If you prefer hard-fail on install error, use MustInstall or check the returned error.
-		_ = func() error {
-			ytdlp.MustInstall(ctx, nil)
-			return nil
-		}()
-	})
+	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
 		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
 		DumpJSON()
 
+	ytdlpDebugf("running yt-dlp for URL: %s", url)
 	res, err := cmd.Run(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("yt-dlp run: %w", err)
@@ -155,6 +155,7 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 
 	// Playlist/search container
 	if len(ext.Entries) > 0 {
+		ytdlpDebugf("got playlist with %d entries", len(ext.Entries))
 		out.Entries = make([]YTDLPEntry, 0, len(ext.Entries))
 		for _, e := range ext.Entries {
 			if e == nil {
@@ -177,7 +178,6 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 			}
 			out.Entries = append(out.Entries, entry)
 		}
-		// Mirror first non-nil entry to top-level, if any
 		for _, first := range ext.Entries {
 			if first == nil {
 				continue
@@ -211,29 +211,91 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 	out.Formats = mapFormats(ext.Formats)
 	out.RequestedFormats = mapReqFormats(ext.RequestedFormats)
 
+	ytdlpDebugf("single item: id=%s title=%s is_live=%v url=%s", out.Id, out.Title, out.IsLive, out.Url)
+
 	return out, nil
 }
 
-// YtdlpAudioURL returns the best playable URL.
-// Preferred order: requested_formats (audio/video), top-level url, then formats[].
+func isManifestURL(u string) bool {
+	if u == "" {
+		return false
+	}
+	us := strings.ToLower(u)
+	return strings.Contains(us, ".m3u8") ||
+		strings.Contains(us, ".mpd") ||
+		strings.Contains(us, "application%2Fx-mpegurl") ||
+		strings.Contains(us, "application/x-mpegurl") ||
+		strings.Contains(us, "application%2Fdash+xml") ||
+		strings.Contains(us, "application/dash+xml")
+}
+
+// YtdlpAudioURL returns the best playable URL, preferring direct audio streams.
 func YtdlpAudioURL(info *YTDLPInfo) string {
+	pick := func(u string, tag string) string {
+		if strings.HasPrefix(u, "http") && !isManifestURL(u) {
+			ytdlpDebugf("selected %s URL: %s", tag, u)
+			return u
+		}
+		if debugOn() && strings.HasPrefix(u, "http") {
+			ytdlpDebugf("skipping %s manifest URL: %s", tag, u)
+		}
+		return ""
+	}
+
+	// 1) requested_formats
 	if len(info.RequestedFormats) > 0 {
 		for _, rf := range info.RequestedFormats {
-			if strings.HasPrefix(rf.Url, "http") {
-				return rf.Url
+			if u := pick(rf.Url, "requested_format"); u != "" {
+				return u
 			}
 		}
 	}
-	if info.Url != "" && strings.HasPrefix(info.Url, "http") {
-		return info.Url
+
+	// 2) top-level url
+	if u := pick(info.Url, "top-level"); u != "" {
+		return u
 	}
+
+	// 3) formats (prefer webm/opus, then m4a/aac)
+	var candidateWebM, candidateM4A, fallback string
 	for _, f := range info.Formats {
-		if strings.HasPrefix(f.Url, "http") {
-			return f.Url
+		u := f.Url
+		if !strings.HasPrefix(u, "http") || isManifestURL(u) {
+			continue
+		}
+		lu := strings.ToLower(u)
+		switch {
+		case strings.Contains(lu, ".webm") || strings.Contains(lu, "audio/webm") || strings.Contains(lu, "opus"):
+			if candidateWebM == "" {
+				candidateWebM = u
+			}
+		case strings.Contains(lu, ".m4a") || strings.Contains(lu, "audio/mp4") || strings.Contains(lu, "aac") || strings.Contains(lu, "mp4a"):
+			if candidateM4A == "" {
+				candidateM4A = u
+			}
+		default:
+			if fallback == "" {
+				fallback = u
+			}
 		}
 	}
+	if candidateWebM != "" {
+		ytdlpDebugf("selected formats (webm/opus): %s", candidateWebM)
+		return candidateWebM
+	}
+	if candidateM4A != "" {
+		ytdlpDebugf("selected formats (m4a/aac): %s", candidateM4A)
+		return candidateM4A
+	}
+	if fallback != "" {
+		ytdlpDebugf("selected formats (fallback): %s", fallback)
+		return fallback
+	}
+
 	if info.WebpageUrl != "" {
+		ytdlpDebugf("falling back to webpage URL: %s", info.WebpageUrl)
 		return info.WebpageUrl
 	}
+	ytdlpDebugf("no usable URL found")
 	return ""
 }
