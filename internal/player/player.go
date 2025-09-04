@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -222,7 +221,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	p.playCtx = playCtx
 	p.playCancel = playCancel
 
-	// Start PCM
+	// Start PCM decode (in-process FFmpeg)
 	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to)
 	if err != nil {
 		playCancel()
@@ -230,11 +229,8 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
-	// Pipe that will carry DCA packets to the Discord sender goroutine
-	pr, pw := io.Pipe()
-
-	// Create DCA encoder that writes to the pipe writer
-	enc, err := stream.NewDCAEncoder(pw)
+	// Create Opus encoder
+	enc, err := stream.NewEncoder()
 	if err != nil {
 		pcm.Close()
 		playCancel()
@@ -242,66 +238,169 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
-	// Encode PCM -> DCA in background
+	// Small jitter buffer (ring) for opus packets
+	const ringCap = 8 // tiny buffer to absorb jitter
+	type opusPkt struct {
+		b []byte // backing array reused; data copied per packet
+		n int    // length
+	}
+	ring := make([]opusPkt, ringCap)
+	for i := range ring {
+		ring[i].b = make([]byte, 4096) // max opus packet we handle
+	}
+	var rHead, rTail, rSize int
+	ringMu := sync.Mutex{}
+	ringCond := sync.NewCond(&ringMu)
+
+	pushPacket := func(pkt []byte) error {
+		ringMu.Lock()
+		defer ringMu.Unlock()
+		if rSize == ringCap {
+			// drop oldest to keep latency bounded
+			rTail = (rTail + 1) % ringCap
+			rSize--
+		}
+		dst := &ring[rHead]
+		if len(pkt) > len(dst.b) {
+			// grow once if needed (very rare)
+			dst.b = make([]byte, len(pkt))
+		}
+		copy(dst.b, pkt)
+		dst.n = len(pkt)
+		rHead = (rHead + 1) % ringCap
+		rSize++
+		ringCond.Signal()
+		return nil
+	}
+
+	// PCM frame working buffer (3840 bytes = 960*2*2)
+	frameBytes := enc.FrameBytes()
+	framePCM := make([]byte, frameBytes)
+	fifo := make([]byte, 0, frameBytes*4)
+
+	// Decode + resample + encode goroutine
 	go func() {
-		defer pw.Close()
-		defer pcm.Close()
-		defer enc.Close()
-		if err := enc.EncodePCMToDCA(pcm.Stdout()); err != nil && err != io.EOF {
-			_ = pw.CloseWithError(err)
+		defer func() {
+			pcm.Close()
+			enc.Close()
+			ringMu.Lock()
+			// Signal no more packets by setting size to -1
+			rSize = -1
+			ringCond.Broadcast()
+			ringMu.Unlock()
+		}()
+
+		// Read raw PCM from pcm.Stdout() and accumulate exact 20ms frames
+		r := bufio.NewReaderSize(pcm.Stdout(), 64*1024)
+
+		for {
+			// Read into a temp buffer
+			buf := make([]byte, 4096)
+			n, err := r.Read(buf)
+			if n > 0 {
+				fifo = append(fifo, buf[:n]...)
+				// While we have at least one full frame, encode it
+				for len(fifo) >= frameBytes {
+					copy(framePCM, fifo[:frameBytes])
+					// shift fifo without allocating: reslice
+					fifo = fifo[frameBytes:]
+
+					if err := enc.EncodeFrame(framePCM, pushPacket); err != nil {
+						return
+					}
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					// Flush encoder with any tail samples (optional: pad/truncate).
+					// For strict 20ms cadence, we skip tail < one frame.
+					_ = enc.Flush(pushPacket)
+				}
+				return
+			}
 		}
 	}()
 
-	// Update state for this song BEFORE sending packets
+	// Update state before sending
 	p.Status = StatusPlaying
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
-	p.PositionSec = pos // ensure PositionSec reflects starting position immediately
+	p.PositionSec = pos
 
-	// Send DCA packets
-	go func(vc *discordgo.VoiceConnection, r io.Reader, song *SongMetadata, startedAt int, cancel context.CancelFunc) {
+	// Sender goroutine: 1 opus packet every 20 ms
+	go func(vc *discordgo.VoiceConnection, startedAt int, cancel context.CancelFunc) {
 		defer func() {
 			p.mu.Lock()
 			p.stopTracking()
 			p.mu.Unlock()
 		}()
 
-		br := bufio.NewReader(r)
-
-		err := sendDCAWithTracking(vc, br, func() {
-			p.mu.Lock()
-			// Start the 1Hz ticker exactly at the first packet, initialized to PositionSec set above
-			p.startTracking(startedAt)
-			p.mu.Unlock()
-		}, playCtx)
-
-		p.mu.Lock()
-		loopingSong := p.LoopSong && p.Status == StatusPlaying
-		loopingQueue := p.LoopQueue && p.Status == StatusPlaying && song != nil
-		canceled := playCtx.Err() != nil
-		p.mu.Unlock()
-
-		if canceled {
-			return
-		}
-		if err != nil {
-			slog.Error("send DCA", "song", song.Title, "err", err)
-			_ = p.Forward(context.Background(), nil, 1)
-			return
-		}
-		if loopingSong {
-			_ = p.Seek(context.Background(), nil, 0)
-			return
-		}
-		if loopingQueue {
-			p.mu.Lock()
-			if song != nil {
-				p.SongQueue = append(p.SongQueue, *song)
+		// Wait for VC ready (reuse your existing helper)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
+			select {
+			case <-playCtx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
 			}
-			p.mu.Unlock()
 		}
-		_ = p.Forward(context.Background(), nil, 1)
-	}(p.Conn, pr, cur, pos, playCancel)
+		if vc == nil || !vc.Ready {
+			return
+		}
+
+		_ = vc.Speaking(true)
+		defer vc.Speaking(false)
+
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+
+		started := false
+
+		for {
+			select {
+			case <-playCtx.Done():
+				return
+			case <-ticker.C:
+				// Pop a packet (block if empty, unless stream ended)
+				ringMu.Lock()
+				for rSize == 0 {
+					if playCtx.Err() != nil {
+						ringMu.Unlock()
+						return
+					}
+					// If producer ended and no packets left, stop
+					if rSize < 0 {
+						ringMu.Unlock()
+						return
+					}
+					ringCond.Wait()
+				}
+				if rSize < 0 {
+					ringMu.Unlock()
+					return
+				}
+				pkt := ring[rTail]
+				rTail = (rTail + 1) % ringCap
+				rSize--
+				ringMu.Unlock()
+
+				if !started {
+					started = true
+					p.mu.Lock()
+					p.startTracking(startedAt)
+					p.mu.Unlock()
+				}
+
+				select {
+				case <-playCtx.Done():
+					return
+				case vc.OpusSend <- pkt.b[:pkt.n]:
+				case <-time.After(200 * time.Millisecond):
+					// timeout: drop and continue
+				}
+			}
+		}
+	}(p.Conn, pos, playCancel)
 
 	return nil
 }

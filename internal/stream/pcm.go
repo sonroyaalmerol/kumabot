@@ -19,7 +19,8 @@ type PCMStreamer struct {
 	srcFrame      *astiav.Frame
 	dstFrame      *astiav.Frame
 	cancel        context.CancelFunc
-	pr, pw        io.PipeReader
+	pr            *io.PipeReader
+	pw            *io.PipeWriter
 	writerClosed  bool
 	runOnce       sync.Once
 	errMu         sync.Mutex
@@ -28,6 +29,8 @@ type PCMStreamer struct {
 	targetLayout  astiav.ChannelLayout
 	targetFormat  astiav.SampleFormat
 	targetNbChans int
+	fifo          []byte
+	frameBytes    int
 }
 
 // StartPCMStream opens inputURL, optionally seeks/trims, and produces raw s16le
@@ -163,8 +166,8 @@ func StartPCMStream(
 		srcFrame:      srcFrame,
 		dstFrame:      dstFrame,
 		cancel:        cancel,
-		pr:            *pr,
-		pw:            *pw,
+		pr:            pr,
+		pw:            pw,
 		targetRate:    targetRate,
 		targetLayout:  targetLayout,
 		targetFormat:  targetFormat,
@@ -177,14 +180,30 @@ func StartPCMStream(
 	return ps, nil
 }
 
-func (s *PCMStreamer) Stdout() io.Reader { return &s.pr }
+func (s *PCMStreamer) initFIFO() {
+	if s.frameBytes == 0 {
+		s.frameBytes = 960 * 2 * 2
+	}
+	if s.fifo == nil {
+		s.fifo = make([]byte, 0, s.frameBytes*4) // small capacity for low latency
+	}
+}
+
+func (s *PCMStreamer) Next20ms() ([]byte, error) {
+	// This is a helper; in our integrated pipeline below we don't expose it directly.
+	return nil, errors.New("not implemented in public API")
+}
+
+func (s *PCMStreamer) Stdout() io.Reader { return s.pr }
 
 func (s *PCMStreamer) Close() {
 	s.runOnce.Do(func() {
 		s.cancel()
 	})
-	_ = s.pr.Close()
-	if !s.writerClosed {
+	if s.pr != nil {
+		_ = s.pr.Close()
+	}
+	if s.pw != nil && !s.writerClosed {
 		_ = s.pw.Close()
 	}
 	if s.srcFrame != nil {
@@ -268,7 +287,7 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 				return
 			}
 			// If it's not EOF, it might be EAGAIN, continue
-			if astErr, ok := err.(astiav.Error); ok && astErr.Is(astiav.ErrorAgain) {
+			if astErr, ok := err.(astiav.Error); ok && astErr.Is(astiav.ErrEagain) {
 				continue
 			}
 			s.setErr(fmt.Errorf("read frame: %w", err))
@@ -281,7 +300,7 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 
 		if err := s.decCtx.SendPacket(packet); err != nil {
 			// drop on EAGAIN
-			if astErr, ok := err.(astiav.Error); !ok || !astErr.Is(astiav.ErrorAgain) {
+			if astErr, ok := err.(astiav.Error); !ok || !astErr.Is(astiav.ErrEagain) {
 				s.setErr(fmt.Errorf("send packet: %w", err))
 				return
 			}
@@ -290,7 +309,7 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 		for {
 			s.srcFrame.Unref()
 			if err := s.decCtx.ReceiveFrame(s.srcFrame); err != nil {
-				if astErr, ok := err.(astiav.Error); ok && (astErr.Is(astiav.ErrorAgain) || astErr.Is(io.EOF)) {
+				if astErr, ok := err.(astiav.Error); ok && (astErr.Is(astiav.ErrEagain) || astErr.Is(io.EOF)) {
 					break
 				}
 				s.setErr(fmt.Errorf("receive frame: %w", err))
