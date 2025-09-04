@@ -294,10 +294,9 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 
 		// Read raw PCM from pcm.Stdout() and accumulate exact 20ms frames
 		r := bufio.NewReaderSize(pcm.Stdout(), 64*1024)
+		buf := make([]byte, 32*1024)
 
 		for {
-			// Read into a temp buffer
-			buf := make([]byte, 4096)
 			n, err := r.Read(buf)
 			if n > 0 {
 				fifo = append(fifo, buf[:n]...)
@@ -337,7 +336,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 			p.mu.Unlock()
 		}()
 
-		// Wait for VC ready (reuse your existing helper)
+		// Wait for ready
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
 			select {
@@ -353,53 +352,55 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		_ = vc.Speaking(true)
 		defer vc.Speaking(false)
 
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-
+		base := time.Now()
+		frameIdx := 0
 		started := false
 
 		for {
-			select {
-			case <-playCtx.Done():
-				return
-			case <-ticker.C:
-				// Pop a packet (block if empty, unless stream ended)
-				ringMu.Lock()
-				for rSize == 0 {
-					if playCtx.Err() != nil {
-						ringMu.Unlock()
-						return
-					}
-					// If producer ended and no packets left, stop
-					if rSize < 0 {
-						ringMu.Unlock()
-						return
-					}
-					ringCond.Wait()
+			// Pop one packet (block until available or EOS)
+			ringMu.Lock()
+			for rSize == 0 {
+				if playCtx.Err() != nil {
+					ringMu.Unlock()
+					return
 				}
 				if rSize < 0 {
 					ringMu.Unlock()
 					return
 				}
-				pkt := ring[rTail]
-				rTail = (rTail + 1) % ringCap
-				rSize--
+				ringCond.Wait()
+			}
+			if rSize < 0 {
 				ringMu.Unlock()
+				return
+			}
+			pkt := ring[rTail]
+			rTail = (rTail + 1) % ringCap
+			rSize--
+			ringMu.Unlock()
 
-				if !started {
-					started = true
-					p.mu.Lock()
-					p.startTracking(startedAt)
-					p.mu.Unlock()
-				}
+			if !started {
+				started = true
+				base = time.Now() // align the schedule to first packet
+				p.mu.Lock()
+				p.startTracking(startedAt)
+				p.mu.Unlock()
+			}
 
-				select {
-				case <-playCtx.Done():
-					return
-				case vc.OpusSend <- pkt.b[:pkt.n]:
-				case <-time.After(200 * time.Millisecond):
-					// timeout: drop and continue
-				}
+			// PTS schedule: one packet every 20 ms
+			next := base.Add(time.Duration(frameIdx) * 20 * time.Millisecond)
+			dur := time.Until(next)
+			if dur > 0 {
+				time.Sleep(dur)
+			}
+			frameIdx++ // always advance, even if send drops, to avoid burst
+
+			select {
+			case <-playCtx.Done():
+				return
+			case vc.OpusSend <- pkt.b[:pkt.n]:
+			case <-time.After(200 * time.Millisecond):
+				// Drop if blocked; we still advanced schedule to avoid racing
 			}
 		}
 	}(p.Conn, pos, playCancel)
