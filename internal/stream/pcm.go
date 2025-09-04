@@ -42,6 +42,13 @@ func StartPCMStream(
 	inputURL string,
 	seek, to *int, // seconds, seek applied before opening; to is a soft stop
 ) (*PCMStreamer, error) {
+	if inputURL == "" {
+		return nil, fmt.Errorf("StartPCMStream: empty input URL")
+	}
+	if strings.Contains(inputURL, "youtube.com/watch") {
+		return nil, fmt.Errorf("StartPCMStream: refusing to open webpage URL: %s", inputURL)
+	}
+
 	_ = astiav.GetLogLevel() // ensure FFmpeg is initialized; optional
 
 	fc := astiav.AllocFormatContext()
@@ -57,9 +64,19 @@ func StartPCMStream(
 	_ = dict.Set("reconnect", "1", 0)
 	_ = dict.Set("reconnect_streamed", "1", 0)
 	_ = dict.Set("reconnect_delay_max", "5", 0)
+	_ = dict.Set("rw_timeout", "15000000", 0)
 
 	var inFmt *astiav.InputFormat
-	if isManifestURL(inputURL) {
+	isHLS := isManifestURL(inputURL)
+	if debugOn() {
+		kind := "DIRECT"
+		if isHLS {
+			kind = "HLS"
+		}
+		fmt.Fprintf(os.Stderr, "[stream/pcm] opening kind=%s url=%s\n", kind, inputURL)
+	}
+
+	if isHLS {
 		// HLS-specific
 		inFmt = astiav.FindInputFormat("hls")
 		// Help the HLS demuxer accept nonstandard extensions and URL forms
@@ -75,18 +92,6 @@ func StartPCMStream(
 		if debugOn() {
 			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening DIRECT: %s\n", inputURL)
 		}
-	}
-
-	isHLS := false
-	if strings.Contains(strings.ToLower(inputURL), ".m3u8") || strings.Contains(strings.ToLower(inputURL), "application%2fx-mpegurl") {
-		isHLS = true
-	}
-	if debugOn() {
-		kind := "DIRECT"
-		if isHLS {
-			kind = "HLS"
-		}
-		fmt.Fprintf(os.Stderr, "[stream/pcm] opening kind=%s url=%s\n", kind, inputURL)
 	}
 
 	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {

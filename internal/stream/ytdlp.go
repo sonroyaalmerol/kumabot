@@ -58,30 +58,45 @@ type MediaURL struct {
 }
 
 func PickMediaURL(info *YTDLPInfo) MediaURL {
-	// Try direct first
-	if u := YtdlpAudioURL(info); u != "" && !isManifestURL(u) {
-		return MediaURL{Kind: "direct", URL: u}
-	}
-	// If not found, allow manifest as HLS fallback
+	// 1) prefer direct (requested -> top-level -> formats)
 	for _, rf := range info.RequestedFormats {
-		if strings.HasPrefix(rf.Url, "http") && isManifestURL(rf.Url) {
-			ytdlpDebugf("HLS fallback using requested_format: %s", rf.Url)
-			return MediaURL{Kind: "hls", URL: rf.Url}
+		u := rf.Url
+		if strings.HasPrefix(u, "http") && !isManifestURL(u) && isLikelyMediaURL(u) {
+			ytdlpDebugf("PickMediaURL: DIRECT requested %s", u)
+			return MediaURL{Kind: "direct", URL: u}
+		}
+	}
+	if strings.HasPrefix(info.Url, "http") && !isManifestURL(info.Url) && isLikelyMediaURL(info.Url) {
+		ytdlpDebugf("PickMediaURL: DIRECT top-level %s", info.Url)
+		return MediaURL{Kind: "direct", URL: info.Url}
+	}
+	for _, f := range info.Formats {
+		u := f.Url
+		if strings.HasPrefix(u, "http") && !isManifestURL(u) && isLikelyMediaURL(u) {
+			ytdlpDebugf("PickMediaURL: DIRECT formats %s", u)
+			return MediaURL{Kind: "direct", URL: u}
+		}
+	}
+	// 2) HLS fallback (requested -> top-level -> formats)
+	for _, rf := range info.RequestedFormats {
+		u := rf.Url
+		if strings.HasPrefix(u, "http") && isManifestURL(u) {
+			ytdlpDebugf("PickMediaURL: HLS requested %s", u)
+			return MediaURL{Kind: "hls", URL: u}
 		}
 	}
 	if strings.HasPrefix(info.Url, "http") && isManifestURL(info.Url) {
-		ytdlpDebugf("HLS fallback using top-level URL: %s", info.Url)
+		ytdlpDebugf("PickMediaURL: HLS top-level %s", info.Url)
 		return MediaURL{Kind: "hls", URL: info.Url}
 	}
-	// Formats list
 	for _, f := range info.Formats {
-		if strings.HasPrefix(f.Url, "http") && isManifestURL(f.Url) {
-			ytdlpDebugf("HLS fallback using formats[]: %s", f.Url)
-			return MediaURL{Kind: "hls", URL: f.Url}
+		u := f.Url
+		if strings.HasPrefix(u, "http") && isManifestURL(u) {
+			ytdlpDebugf("PickMediaURL: HLS formats %s", u)
+			return MediaURL{Kind: "hls", URL: u}
 		}
 	}
 	ytdlpDebugf("PickMediaURL: none")
-	// Nothing viable
 	return MediaURL{}
 }
 
@@ -166,7 +181,7 @@ func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
 	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
-		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
+		Format("ba[acodec^=opus]/ba[acodec^=mp4a]/bestaudio[protocol!=m3u8][protocol!=m3u8_native][protocol!=http_dash_segments]/best").
 		NoCheckCertificates().
 		DumpJSON()
 
