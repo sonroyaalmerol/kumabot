@@ -410,6 +410,11 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 		if err := s.swr.ConvertFrame(src, s.dstFrame); err != nil {
 			return fmt.Errorf("swr init convert: %w", err)
 		}
+		// Ensure SWR output is either S16 (packed) or S16P (planar)
+		dfmt := s.dstFrame.SampleFormat()
+		if dfmt != astiav.SampleFormatS16 && dfmt != astiav.SampleFormatS16P {
+			return fmt.Errorf("unexpected dst sample format after swr init: %s", dfmt.String())
+		}
 		// Discard data from the init convert to avoid duplicating samples
 		s.dstFrame.Unref()
 		s.initedSWR = true
@@ -477,46 +482,49 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 			s.dstFrame.ChannelLayout().Channels())
 	}
 
-	// Detect packed vs planar and interleave if needed
-	ch := 2
-	p0, err := s.dstFrame.Data().Bytes(0)
-	if err != nil {
-		return fmt.Errorf("dst plane0 bytes: %w", err)
-	}
+	// Build interleaved S16LE buffer based on declared sample format
+	const bytesPerSample = 2
+	ch := s.dstFrame.ChannelLayout().Channels()
+	isPlanar := s.dstFrame.SampleFormat().IsPlanar()
+	total := nb * ch * bytesPerSample
+	interleaved := make([]byte, total)
 
-	// Planar detected if plane 1 exists and has data
-	isPlanar := false
-	if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
-		isPlanar = true
-	}
-
-	var interleaved []byte
 	if !isPlanar {
-		// Packed interleaved S16LE: expect nb*ch*2 bytes in plane 0
-		total := nb * ch * 2
-		if len(p0) < total {
-			return fmt.Errorf("packed dst too small: got %d, want %d", len(p0), total)
-		}
-		interleaved = make([]byte, total)
-		copy(interleaved, p0[:total])
-	} else {
-		// Planar S16P: each plane has nb*2 bytes
-		p1, err := s.dstFrame.Data().Bytes(1)
+		// Packed: copy with SamplesCopyToBuffer to respect linesize
+		n, err := s.dstFrame.SamplesCopyToBuffer(interleaved, 1)
 		if err != nil {
-			return fmt.Errorf("dst plane1 bytes: %w", err)
+			return fmt.Errorf("packed copy to buffer: %w", err)
 		}
-		need := nb * 2
-		if len(p0) < need || len(p1) < need {
-			return fmt.Errorf("planar dst too small: p0=%d p1=%d want=%d", len(p0), len(p1), need)
+		if n != total {
+			return fmt.Errorf("packed copy size mismatch: got %d want %d", n, total)
 		}
-		total := nb * ch * 2
-		interleaved = make([]byte, total)
-		// Interleave LR sample-by-sample: little-endian 16-bit
+	} else {
+		// Planar: interleave using linesizes and bytes-per-sample
+		// We assume S16P as target; validate sample format
+		if s.dstFrame.SampleFormat() != astiav.SampleFormatS16P {
+			return fmt.Errorf("unexpected planar format: %s", s.dstFrame.SampleFormat().String())
+		}
+		// Gather plane byte slices
+		planes := make([][]byte, ch)
+		for c := 0; c < ch; c++ {
+			pb, err := s.dstFrame.Data().Bytes(c)
+			if err != nil {
+				return fmt.Errorf("dst plane%d bytes: %w", c, err)
+			}
+			if len(pb) < nb*bytesPerSample {
+				return fmt.Errorf("planar dst too small: ch%d=%d need=%d", c, len(pb), nb*bytesPerSample)
+			}
+			planes[c] = pb
+		}
+		// Interleave sample-by-sample, channel order as provided
+		// sample index i: for each channel c, append 2 bytes
+		outOff := 0
 		for i := 0; i < nb; i++ {
-			// L
-			copy(interleaved[(i*2+0)*2:(i*2+0)*2+2], p0[i*2:i*2+2])
-			// R
-			copy(interleaved[(i*2+1)*2:(i*2+1)*2+2], p1[i*2:i*2+2])
+			for c := 0; c < ch; c++ {
+				src := planes[c][i*bytesPerSample : i*bytesPerSample+bytesPerSample]
+				copy(interleaved[outOff:outOff+bytesPerSample], src)
+				outOff += bytesPerSample
+			}
 		}
 	}
 
@@ -565,57 +573,45 @@ func (s *PCMStreamer) flushSWR() error {
 			return err
 		}
 
-		// Interleave like convertAndWritePCM
+		// Interleave like convertAndWritePCM using declared format
 		nb := s.dstFrame.NbSamples()
 		if nb <= 0 {
 			continue
 		}
+		const bytesPerSample = 2
 		ch := s.targetLayout.Channels()
+		total := nb * ch * bytesPerSample
+		interleaved := make([]byte, total)
 
-		p0, err := s.dstFrame.Data().Bytes(0)
-		if err != nil {
-			return err
-		}
-
-		isPlanar := false
-		if ch > 1 {
-			if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
-				isPlanar = true
+		if !s.dstFrame.SampleFormat().IsPlanar() {
+			n, err := s.dstFrame.SamplesCopyToBuffer(interleaved, 1)
+			if err != nil {
+				return err
 			}
-		}
-
-		var interleaved []byte
-		if !isPlanar {
-			total := nb * ch * 2
-			if len(p0) < total {
-				return fmt.Errorf("packed dst too small: got %d, want %d", len(p0), total)
+			if n != total {
+				return fmt.Errorf("flush packed copy size mismatch: got %d want %d", n, total)
 			}
-			interleaved = make([]byte, total)
-			copy(interleaved, p0[:total])
 		} else {
+			if s.dstFrame.SampleFormat() != astiav.SampleFormatS16P {
+				return fmt.Errorf("flush unexpected planar format: %s", s.dstFrame.SampleFormat().String())
+			}
 			planes := make([][]byte, ch)
-			planes[0] = p0
-			needPerPlane := nb * 2
-			for c := 1; c < ch; c++ {
-				pc, err := s.dstFrame.Data().Bytes(c)
+			for c := 0; c < ch; c++ {
+				pb, err := s.dstFrame.Data().Bytes(c)
 				if err != nil {
 					return err
 				}
-				planes[c] = pc
-			}
-			for c := 0; c < ch; c++ {
-				if len(planes[c]) < needPerPlane {
-					return fmt.Errorf("planar dst too small: ch%d=%d need=%d", c, len(planes[c]), needPerPlane)
+				if len(pb) < nb*bytesPerSample {
+					return fmt.Errorf("flush planar too small: ch%d=%d need=%d", c, len(pb), nb*bytesPerSample)
 				}
+				planes[c] = pb
 			}
-			total := nb * ch * 2
-			interleaved = make([]byte, total)
+			outOff := 0
 			for i := 0; i < nb; i++ {
 				for c := 0; c < ch; c++ {
-					copy(
-						interleaved[(i*ch+c)*2:(i*ch+c)*2+2],
-						planes[c][i*2:i*2+2],
-					)
+					src := planes[c][i*bytesPerSample : i*bytesPerSample+bytesPerSample]
+					copy(interleaved[outOff:outOff+bytesPerSample], src)
+					outOff += bytesPerSample
 				}
 			}
 		}
