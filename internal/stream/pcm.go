@@ -331,8 +331,9 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 }
 
 func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
-	// Capture input params from the first frame
+	// Capture input params and initialize SWR once
 	if !s.initedSWR {
+		// Determine input parameters from the first frame (fall back to decoder if needed)
 		s.inRate = src.SampleRate()
 		if s.inRate == 0 {
 			s.inRate = s.decCtx.SampleRate()
@@ -355,16 +356,33 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 			}
 		}
 
-		// Set up SWR with explicit in/out and init
-		// go-astiav provides SetOptions via frames or via context setters depending on version.
-		// The ConvertFrame(src, dst) path will auto-config if both frames are fully specified.
-		// We’ll use frames route but also call swr.Init() by doing a dummy convert to lock it in.
-
+		// Configure dst params on dstFrame (we use ConvertFrame API to init SWR)
 		s.dstFrame.Unref()
 		s.dstFrame.SetChannelLayout(s.targetLayout)
 		s.dstFrame.SetSampleRate(s.targetRate)
 		s.dstFrame.SetSampleFormat(s.targetFormat)
 
+		// Perform a minimal convert to force SWR initialization.
+		// We allocate a small dst buffer sized for the first input's estimate.
+		inNb := src.NbSamples()
+		if inNb <= 0 {
+			inNb = 1024
+		}
+		// Simple estimate without Delay because not inited yet:
+		outSamples := int((int64(inNb)*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
+		if outSamples <= 0 {
+			outSamples = 1
+		}
+		s.dstFrame.SetNbSamples(outSamples)
+		if err := s.dstFrame.AllocBuffer(0); err != nil {
+			return fmt.Errorf("dst alloc (init): %w", err)
+		}
+		// This call will initialize the internal SWR with src/dst params
+		if err := s.swr.ConvertFrame(src, s.dstFrame); err != nil {
+			return fmt.Errorf("swr init convert: %w", err)
+		}
+		// We will discard this first converted data from initialization to avoid duplicating samples.
+		s.dstFrame.Unref()
 		s.initedSWR = true
 	}
 
@@ -399,10 +417,16 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		src.SetChannelLayout(s.inLayout)
 	}
 
-	// Estimate out samples using swr delay
+	// Estimate out samples; only use Delay() after SWR is initialized
 	inNb := src.NbSamples()
-	delay := s.swr.Delay(int64(s.inRate))
-	outSamples := int(((delay+int64(inNb))*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
+	var outSamples int
+	if s.initedSWR {
+		delay := s.swr.Delay(int64(s.inRate))
+		outSamples = int(((delay+int64(inNb))*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
+	} else {
+		// Should not happen because we init in onDecodedFrame
+		outSamples = int((int64(inNb)*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
+	}
 	if outSamples <= 0 {
 		outSamples = 1
 	}
@@ -450,6 +474,9 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 
 // Flush any remaining samples in SWR, then drop tail < 960 samples to keep cadence strict
 func (s *PCMStreamer) flushSWR() error {
+	if !s.initedSWR {
+		return nil
+	}
 	for {
 		d := s.swr.Delay(int64(s.inRate))
 		if d <= 0 {
