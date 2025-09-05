@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/sonroyaalmerol/kumabot/internal/player"
@@ -87,6 +88,8 @@ func BuildQueueEmbed(
 	pageSize int,
 	ongoingQueue bool,
 ) (*discordgo.MessageEmbed, error) {
+	const maxDesc = 4096
+
 	cur := p.GetCurrent()
 	if cur == nil {
 		return nil, fmt.Errorf("queue is empty")
@@ -148,7 +151,43 @@ func BuildQueueEmbed(
 	}
 
 	if len(items) > 0 {
-		desc += "**Up next:**\n" + out
+		// Add header first
+		upNextHeader := "**Up next:**\n"
+		desc += upNextHeader
+
+		// Budget remaining for the queue lines
+		remaining := maxDesc - len(desc)
+		if remaining < 0 {
+			remaining = 0
+		}
+
+		// Append as many lines as fit
+		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		built := &strings.Builder{}
+		consumed := 0
+		shown := 0
+		for _, line := range lines {
+			lineLen := len(line) + 1 // include newline
+			if consumed+lineLen > remaining {
+				break
+			}
+			built.WriteString(line)
+			built.WriteByte('\n')
+			consumed += lineLen
+			shown++
+		}
+
+		desc += built.String()
+
+		// If we couldn't include all items, indicate how many remain
+		if shown < len(lines) {
+			remainingItems := len(lines) - shown
+			more := fmt.Sprintf("…and %d more", remainingItems)
+			// Only add the “more” line if it fits
+			if len(desc)+len(more)+1 <= maxDesc {
+				desc += more
+			}
+		}
 	}
 
 	embed := &discordgo.MessageEmbed{
