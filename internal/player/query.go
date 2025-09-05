@@ -241,7 +241,7 @@ func applySponsorBlockToSong(ctx context.Context, cfg *config.Config, m *SongMet
 	if sb == nil {
 		return
 	}
-	newLen, newOff, _, changed := sb.Adjust(ctx, m.URL, m.Length, m.Offset)
+	newLen, newOff, _, changed := sb.Adjust(ctx, m.VideoID, m.Length, m.Offset)
 	if changed {
 		m.Length = newLen
 		m.Offset = newOff
