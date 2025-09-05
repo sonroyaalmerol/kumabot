@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/asticode/go-astiav"
-	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
 
 type PCMFrame struct {
@@ -58,6 +57,12 @@ func pcmDebugf(format string, args ...any) {
 	}
 }
 
+func init() {
+	if debugOn() {
+		astiav.SetLogLevel(astiav.LogLevelDebug)
+	}
+}
+
 func StartPCMStream(
 	ctx context.Context,
 	inputURL string,
@@ -80,28 +85,28 @@ func StartPCMStream(
 	dict := astiav.NewDictionary()
 	defer dict.Free()
 
-	hdrs := map[string]string{
-		"User-Agent":      utils.RandomUserAgent(),
-		"Referer":         "https://www.youtube.com/",
-		"Accept":          "*/*",
-		"Accept-Language": "en-US,en;q=0.9",
-		"Origin":          "https://www.youtube.com",
-		"Connection":      "keep-alive",
-	}
+	//hdrs := map[string]string{
+	//	"User-Agent":      utils.RandomUserAgent(),
+	//	"Referer":         "https://www.youtube.com/",
+	//	"Accept":          "*/*",
+	//	"Accept-Language": "en-US,en;q=0.9",
+	//	"Origin":          "https://www.youtube.com",
+	//	"Connection":      "keep-alive",
+	//}
 
-	headersBlob := utils.BuildFFmpegHeaders(hdrs)
-	if headersBlob != "" {
-		_ = dict.Set("headers", headersBlob, 0)
-	}
+	//headersBlob := utils.BuildFFmpegHeaders(hdrs)
+	//if headersBlob != "" {
+	//	_ = dict.Set("headers", headersBlob, 0)
+	//}
 
-	_ = dict.Set("user_agent", hdrs["User-Agent"], 0)
-	_ = dict.Set("referer", hdrs["Referer"], 0)
-	_ = dict.Set("reconnect", "1", 0)
-	_ = dict.Set("reconnect_streamed", "1", 0)
-	_ = dict.Set("reconnect_delay_max", "5", 0)
-	_ = dict.Set("rw_timeout", "15000000", 0)
-	_ = dict.Set("http_persistent", "1", 0)
-	_ = dict.Set("http_multiple", "0", 0)
+	//_ = dict.Set("user_agent", hdrs["User-Agent"], 0)
+	//_ = dict.Set("referer", hdrs["Referer"], 0)
+	//_ = dict.Set("reconnect", "1", 0)
+	//_ = dict.Set("reconnect_streamed", "1", 0)
+	//_ = dict.Set("reconnect_delay_max", "5", 0)
+	//_ = dict.Set("rw_timeout", "15000000", 0)
+	//_ = dict.Set("http_persistent", "1", 0)
+	//_ = dict.Set("http_multiple", "0", 0)
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
