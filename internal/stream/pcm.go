@@ -42,13 +42,16 @@ type PCMStreamer struct {
 	timeBase     astiav.Rational
 	initedSWR    bool // after first successful ConvertFrame
 	inRate       int
-	inFmt        astiav.SampleFormat
 	inLayout     astiav.ChannelLayout
 	outPTS48Next int64
 	gotFirstPTS  bool
 	firstPTS48   int64
 
 	fifo []byte
+
+	inputURL string
+	isHLS    bool
+	inFmt    *astiav.InputFormat
 }
 
 var debugOnce int32
@@ -215,6 +218,9 @@ func StartPCMStream(
 		targetNbChans: 2,
 		timeBase:      st.TimeBase(),
 		fifo:          make([]byte, 0, 3840*8),
+		inputURL:      inputURL,
+		isHLS:         isHLS,
+		inFmt:         inFmt,
 	}
 
 	go ps.run(ctx2, seek, to)
@@ -267,6 +273,8 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 
 	var stopPTS48 int64 = -1
 
+	retry := 0
+	const maxRetry = 3
 	for {
 		select {
 		case <-ctx.Done():
@@ -290,12 +298,38 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 				_ = s.flushSWR()
 				return
 			}
-			if astErr, ok := err.(astiav.Error); ok && astErr.Is(astiav.ErrEagain) {
-				continue
+			// Retryable network error?
+			if astErr, ok := err.(astiav.Error); ok && (astErr.Is(astiav.ErrEagain) || astErr.Is(astiav.ErrEio) || astErr.Is(astiav.ErrEtimedout)) {
+				// fallthrough to retry path
+			} else {
+				// Some tls/http errors are not mapped; check string
+				es := fmt.Sprint(err)
+				if strings.Contains(es, "Connection reset by peer") ||
+					strings.Contains(es, "The specified session has been invalidated") ||
+					strings.Contains(es, "IO error") ||
+					strings.Contains(es, "Input/output error") {
+					// retry path
+				} else {
+					pcmDebugf("read frame error (fatal): %v", err)
+					return
+				}
 			}
-			pcmDebugf("read frame error: %v", err)
-			return
+			if retry >= maxRetry {
+				pcmDebugf("read frame error: %v (giving up after %d retries)", err, retry)
+				return
+			}
+			retry++
+			backoff := time.Duration(retry*300) * time.Millisecond
+			pcmDebugf("read frame error: %v (retry %d/%d after %v)", err, retry, maxRetry, backoff)
+			time.Sleep(backoff)
+			if err := s.reopenAndSeek(); err != nil {
+				pcmDebugf("reopen failed: %v", err)
+				return
+			}
+			// Clear decoder buffered frames
+			continue
 		}
+		retry = 0
 
 		if packet.StreamIndex() != s.audioStream.Index() {
 			continue
@@ -332,6 +366,93 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 			}
 		}
 	}
+}
+
+// reopenAndSeek attempts to reopen the input and seek near the last emitted PTS
+func (s *PCMStreamer) reopenAndSeek() error {
+	// Close existing contexts
+	if s.fc != nil {
+		s.fc.CloseInput()
+		s.fc.Free()
+		s.fc = nil
+	}
+	// Alloc fresh format context
+	fc := astiav.AllocFormatContext()
+	if fc == nil {
+		return errors.New("alloc format context (reopen)")
+	}
+	dict := astiav.NewDictionary()
+	// Keep HLS options if needed
+	if s.isHLS {
+		_ = dict.Set("allowed_extensions", "ALL", 0)
+		_ = dict.Set("http_seekable", "0", 0)
+		_ = dict.Set("live_start_index", "0", 0)
+		_ = dict.Set("probesize", "262144", 0)
+		_ = dict.Set("analyzeduration", "2000000", 0)
+	}
+	if err := fc.OpenInput(s.inputURL, s.inFmt, dict); err != nil {
+		dict.Free()
+		fc.Free()
+		return fmt.Errorf("open input (reopen): %w", err)
+	}
+	dict.Free()
+	if err := fc.FindStreamInfo(nil); err != nil {
+		fc.CloseInput()
+		fc.Free()
+		return fmt.Errorf("find stream info (reopen): %w", err)
+	}
+	// Find same audio stream index (best audio)
+	st, codec, err := fc.FindBestStream(astiav.MediaTypeAudio, -1, -1)
+	if err != nil || st == nil || codec == nil {
+		fc.CloseInput()
+		fc.Free()
+		if err != nil {
+			return fmt.Errorf("find best audio stream (reopen): %w", err)
+		}
+		return errors.New("no audio stream found (reopen)")
+	}
+	// Recreate decoder
+	if s.decCtx != nil {
+		s.decCtx.Free()
+	}
+	decCtx := astiav.AllocCodecContext(codec)
+	if decCtx == nil {
+		fc.CloseInput()
+		fc.Free()
+		return errors.New("alloc codec context (reopen)")
+	}
+	if err := decCtx.FromCodecParameters(st.CodecParameters()); err != nil {
+		decCtx.Free()
+		fc.CloseInput()
+		fc.Free()
+		return fmt.Errorf("codec from params (reopen): %w", err)
+	}
+	decCtx.SetTimeBase(st.TimeBase())
+	if err := decCtx.Open(codec, nil); err != nil {
+		decCtx.Free()
+		fc.CloseInput()
+		fc.Free()
+		return fmt.Errorf("open decoder (reopen): %w", err)
+	}
+	// Swap contexts
+	s.fc = fc
+	s.audioStream = st
+	s.decCtx = decCtx
+	s.timeBase = st.TimeBase()
+	// Seek near last output PTS (48k clock)
+	if s.outPTS48Next > 0 {
+		ts := astiav.RescaleQ(s.outPTS48Next, astiav.NewRational(1, 48000), s.timeBase)
+		_ = s.fc.SeekFrame(s.audioStream.Index(), ts, astiav.NewSeekFlags())
+		_ = s.fc.Flush()
+	}
+	// Clear FIFO to re-align to next 960 boundary
+	s.fifo = s.fifo[:0]
+	// Reset SWR init so it re-initializes on next frame
+	s.initedSWR = false
+	s.inRate = 0
+	s.inFmt = nil
+	s.inLayout = astiav.ChannelLayout{}
+	return nil
 }
 
 func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
@@ -378,9 +499,6 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 	// Ensure fields are set on src for SWR
 	if src.SampleRate() == 0 {
 		src.SetSampleRate(s.inRate)
-	}
-	if src.SampleFormat().Name() == "" {
-		src.SetSampleFormat(s.inFmt)
 	}
 	if !src.ChannelLayout().Valid() || src.ChannelLayout().Channels() == 0 {
 		src.SetChannelLayout(s.inLayout)
@@ -429,9 +547,6 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	// Ensure src fields are sane
 	if src.SampleRate() == 0 {
 		src.SetSampleRate(s.inRate)
-	}
-	if src.SampleFormat().Name() == "" {
-		src.SetSampleFormat(s.inFmt)
 	}
 	if !src.ChannelLayout().Valid() || src.ChannelLayout().Channels() == 0 {
 		src.SetChannelLayout(s.inLayout)
