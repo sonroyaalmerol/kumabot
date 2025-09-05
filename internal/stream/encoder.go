@@ -30,6 +30,8 @@ func dprintf(format string, args ...any) {
 	}
 }
 
+var ForceMonoTest = true
+
 func pcmRMS16LE(b []byte) float64 {
 	if len(b)%2 != 0 {
 		return 0
@@ -51,36 +53,40 @@ func pcmRMS16LE(b []byte) float64 {
 func NewEncoder() (*Encoder, error) {
 	const (
 		sampleRate = 48000
-		channels   = 2
 		frameSize  = 960
 	)
+
+	channels := 2
+	layout := astiav.ChannelLayoutStereo
+	if ForceMonoTest {
+		channels = 1
+		layout = astiav.ChannelLayoutMono
+	}
 
 	codec := astiav.FindEncoderByName("libopus")
 	if codec == nil {
 		return nil, errors.New("libopus encoder not found")
 	}
-	dprintf("using codec=%s (decoder=%v encoder=%v)", codec.Name(), codec.IsDecoder(), codec.IsEncoder())
 
 	cc := astiav.AllocCodecContext(codec)
 	if cc == nil {
 		return nil, errors.New("alloc codec context")
 	}
 	cc.SetSampleRate(sampleRate)
-	cc.SetChannelLayout(astiav.ChannelLayoutStereo)
+	cc.SetChannelLayout(layout)
 	cc.SetSampleFormat(astiav.SampleFormatS16)
-	cc.SetBitRate(160_000)
+	cc.SetBitRate(96_000)
 
 	opts := astiav.NewDictionary()
 	defer opts.Free()
 	_ = opts.Set("frame_duration", "20", 0)
-	_ = opts.Set("application", "audio", 0) // better for music/general audio
+	_ = opts.Set("application", "audio", 0)
+	// Avoid extra toggles while diagnosing (no vbr/dtx/compression tweaking)
 
 	if err := cc.Open(codec, opts); err != nil {
 		cc.Free()
 		return nil, fmt.Errorf("open opus encoder: %w", err)
 	}
-	dprintf("opened encoder: sr=%d ch=%d fmt=%s bitrate=%d",
-		cc.SampleRate(), cc.ChannelLayout().Channels(), cc.SampleFormat().String(), cc.BitRate())
 
 	frame := astiav.AllocFrame()
 	if frame == nil {
@@ -88,7 +94,7 @@ func NewEncoder() (*Encoder, error) {
 		return nil, errors.New("alloc frame")
 	}
 	frame.SetSampleRate(sampleRate)
-	frame.SetChannelLayout(astiav.ChannelLayoutStereo)
+	frame.SetChannelLayout(layout)
 	frame.SetSampleFormat(astiav.SampleFormatS16)
 	frame.SetNbSamples(frameSize)
 	if err := frame.AllocBuffer(0); err != nil {
@@ -96,8 +102,6 @@ func NewEncoder() (*Encoder, error) {
 		cc.Free()
 		return nil, fmt.Errorf("frame alloc buffer: %w", err)
 	}
-	dprintf("prepared frame buffer: nb_samples=%d bytes_per_frame=%d",
-		frameSize, frameSize*channels*2)
 
 	pkt := astiav.AllocPacket()
 	if pkt == nil {
@@ -131,24 +135,17 @@ func (e *Encoder) Close() {
 
 // EncodeFrame expects interleaved s16le PCM for exactly 960 samples/ch (20 ms).
 // pcm length must be 960 * channels * 2 bytes = 3840 bytes.
-func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
-	expected := e.frameSize * e.channels * 2
+func (e *Encoder) EncodeFrame(pcm []byte, onPacket func(pkt []byte) error) error {
+	expected := e.FrameBytes()
 	if len(pcm) != expected {
 		return fmt.Errorf("pcm must be %d bytes, got %d", expected, len(pcm))
 	}
-
 	if err := e.frame.Data().SetBytes(pcm, 0); err != nil {
 		return fmt.Errorf("frame set bytes: %w", err)
-	}
-	if debugOn() {
-		// ms := pcmRMS16LE(pcm)
-		// dprintf("frame PCM mean-square=%f", ms)
 	}
 	if err := e.cc.SendFrame(e.frame); err != nil {
 		return fmt.Errorf("send frame: %w", err)
 	}
-	// dprintf("sent frame: bytes=%d", len(pcm))
-
 	for {
 		e.packet.Unref()
 		if err := e.cc.ReceivePacket(e.packet); err != nil {
@@ -157,7 +154,6 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 			}
 			return fmt.Errorf("receive packet: %w", err)
 		}
-		// dprintf("got opus packet: size=%d", e.packet.Size())
 		if err := onPacket(e.packet.Data()); err != nil {
 			return err
 		}

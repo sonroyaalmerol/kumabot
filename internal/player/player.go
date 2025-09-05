@@ -293,16 +293,14 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		_ = vc.Speaking(true)
 		defer vc.Speaking(false)
 
-		// Ensure we release resources when done
 		defer func() {
 			enc.Close()
 			pcm.Close()
-			cancel()
+			cancel() // safe
 		}()
 
 		r := bufio.NewReaderSize(pcm.Stdout(), 128*1024)
 		framePCM := make([]byte, enc.FrameBytes())
-
 		var wall0 time.Time
 		var media0 int64
 		var started bool
@@ -315,12 +313,42 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		}
 
 		for {
-			// Read exactly one 960-sample PCM frame with its PTS
+			// Read one framed PCM
 			f, err := readPCMFrame(r)
 			if err != nil {
-				// Do NOT flush encoder for fixed 20ms packets
-				// Exit gracefully on EOF or other error
+				// Any terminal error: stop cleanly (EOF or network)
 				return
+			}
+
+			// Optional mono A/B: downmix stereo->mono if enabled (and encoder created as mono)
+			if stream.ForceMonoTest {
+				// f.data is 3840 bytes (stereo). Build mono 960*2 bytes.
+				if len(framePCM) != 960*2 {
+					// encoder must have been created with mono
+					// If not, re-create encoder or bail:
+					return
+				}
+				mono := framePCM[:0]
+				mono = append(mono, make([]byte, 960*2)...)
+				for i := 0; i < 960; i++ {
+					l0 := int16(uint16(f.data[i*4+0]) | uint16(f.data[i*4+1])<<8)
+					r0 := int16(uint16(f.data[i*4+2]) | uint16(f.data[i*4+3])<<8)
+					m := (int32(l0) + int32(r0)) >> 1
+					if m > 32767 {
+						m = 32767
+					} else if m < -32768 {
+						m = -32768
+					}
+					mono[i*2+0] = byte(uint16(m) & 0xff)
+					mono[i*2+1] = byte((uint16(m) >> 8) & 0xff)
+				}
+			} else {
+				// Standard stereo path
+				if len(framePCM) != len(f.data) {
+					// Stereo encoder expects 3840
+					return
+				}
+				copy(framePCM, f.data)
 			}
 
 			if !started {
@@ -333,10 +361,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 				p.mu.Unlock()
 			}
 
-			// Prepare PCM for encoder
-			copy(framePCM, f.data)
-
-			// Encode exactly one packet
+			// Encode one packet
 			var outPkt []byte
 			err = enc.EncodeFrame(framePCM, func(pkt []byte) error {
 				outPkt = append(outPkt[:0], pkt...)
@@ -346,11 +371,10 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 				return
 			}
 			if len(outPkt) == 0 {
-				// Shouldn't happen with 960-sample frames; skip if it does
 				continue
 			}
 
-			// Schedule send by media PTS
+			// Pace by media time
 			offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
 			target := wall0.Add(offset)
 			now := time.Now()
@@ -365,7 +389,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 			case vc.OpusSend <- outPkt:
 				updatePosition(f.pts48)
 			case <-time.After(200 * time.Millisecond):
-				// Drop if blocked; schedule continues (rare)
+				// Drop if blocked
 			}
 		}
 	}(p.Conn, pos, playCancel)
