@@ -176,6 +176,40 @@ func (p *Player) GetCurrent() *SongMetadata {
 	return p.currentLocked()
 }
 
+func (p *Player) GetQueuePage(page, pageSize int) ([]SongMetadata, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Visible queue excludes the current song: p.SongQueue[p.Qpos+1:]
+	if p.Qpos+1 >= len(p.SongQueue) {
+		return []SongMetadata{}, 0
+	}
+
+	visible := p.SongQueue[p.Qpos+1:]
+	total := len(visible)
+
+	start := (page - 1) * pageSize
+	if start >= total {
+		return []SongMetadata{}, total
+	}
+
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	out := make([]SongMetadata, end-start)
+	copy(out, visible[start:end])
+	return out, total
+}
+
 func (p *Player) QueueSize() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
