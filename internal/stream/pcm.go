@@ -304,6 +304,21 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 					}
 				}
 				_ = s.flushSWR()
+
+				const frameBytes = 960 * 2 * 2
+				if rem := len(s.fifo); rem > 0 {
+					pad := make([]byte, frameBytes-rem) // zeros = silence
+					s.fifo = append(s.fifo, pad...)
+					chunk := s.fifo[:frameBytes]
+					pts := s.outPTS48Next
+					_ = writePCMFrame(s.pw, PCMFrame{
+						Data:      chunk,
+						PTS48:     pts,
+						NbSamples: 960,
+					})
+					s.outPTS48Next += 960
+					s.fifo = s.fifo[frameBytes:]
+				}
 				return
 			}
 			// Retryable network error?

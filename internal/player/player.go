@@ -274,6 +274,42 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		defer func() {
 			p.mu.Lock()
 			p.stopTracking()
+			// Decide next action: loop song, loop queue, or advance/idle
+			finished := true
+			cur := p.currentLocked()
+			if finished && cur != nil {
+				if p.LoopSong {
+					// Re-seek to start
+					seek0 := 0
+					p.requestedSeek = &seek0
+					p.Status = StatusPaused
+					// unlock before starting next Play
+					p.mu.Unlock()
+					go func() { _ = p.Play(ctx, s) }()
+					return
+				}
+				// Advance Qpos according to loopQueue or normal
+				if p.LoopQueue && len(p.SongQueue) > 0 {
+					// rotate: move current to end
+					item := p.SongQueue[p.Qpos]
+					// remove current
+					p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
+					// append to end
+					p.SongQueue = append(p.SongQueue, item)
+					// keep Qpos at same index to point to new current
+				} else {
+					p.Qpos++
+				}
+				p.PositionSec = 0
+				p.Status = StatusIdle
+				p.mu.Unlock()
+				// If there is a next song, start it
+				if p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
+					_ = p.Play(ctx, s)
+				}
+				return
+			}
+			// default: just unlock
 			p.mu.Unlock()
 		}()
 
