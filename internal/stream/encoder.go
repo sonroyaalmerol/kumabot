@@ -73,10 +73,7 @@ func NewEncoder() (*Encoder, error) {
 	opts := astiav.NewDictionary()
 	defer opts.Free()
 	_ = opts.Set("frame_duration", "20", 0)
-	_ = opts.Set("dtx", "0", 0)
-	_ = opts.Set("vbr", "off", 0)           // debug: force CBR-like behavior to avoid DTX
 	_ = opts.Set("application", "audio", 0) // better for music/general audio
-	_ = opts.Set("compression_level", "8", 0)
 
 	if err := cc.Open(codec, opts); err != nil {
 		cc.Free()
