@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/asticode/go-astiav"
+	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
 
 type PCMFrame struct {
@@ -78,8 +79,23 @@ func StartPCMStream(
 
 	dict := astiav.NewDictionary()
 	defer dict.Free()
-	_ = dict.Set("user_agent", "Mozilla/5.0", 0)
-	_ = dict.Set("referer", "https://www.youtube.com/", 0)
+
+	hdrs := map[string]string{
+		"User-Agent":      utils.RandomUserAgent(),
+		"Referer":         "https://www.youtube.com/",
+		"Accept":          "*/*",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Origin":          "https://www.youtube.com",
+		"Connection":      "keep-alive",
+	}
+
+	headersBlob := utils.BuildFFmpegHeaders(hdrs)
+	if headersBlob != "" {
+		_ = dict.Set("headers", headersBlob, 0)
+	}
+
+	_ = dict.Set("user_agent", hdrs["User-Agent"], 0)
+	_ = dict.Set("referer", hdrs["Referer"], 0)
 	_ = dict.Set("reconnect", "1", 0)
 	_ = dict.Set("reconnect_streamed", "1", 0)
 	_ = dict.Set("reconnect_delay_max", "5", 0)
@@ -96,8 +112,6 @@ func StartPCMStream(
 		_ = dict.Set("live_start_index", "0", 0)
 		_ = dict.Set("probesize", "262144", 0)
 		_ = dict.Set("analyzeduration", "2000000", 0)
-		headers := "Origin: https://www.youtube.com\r\nAccept: */*\r\nConnection: keep-alive\r\n"
-		_ = dict.Set("headers", headers, 0)
 	}
 
 	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {
