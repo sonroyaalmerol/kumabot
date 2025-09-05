@@ -382,14 +382,16 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	}
 	dict := astiav.NewDictionary()
 	// Keep HLS options if needed
+	var inFmt *astiav.InputFormat
 	if s.isHLS {
+		inFmt = astiav.FindInputFormat("hls")
 		_ = dict.Set("allowed_extensions", "ALL", 0)
 		_ = dict.Set("http_seekable", "0", 0)
 		_ = dict.Set("live_start_index", "0", 0)
 		_ = dict.Set("probesize", "262144", 0)
 		_ = dict.Set("analyzeduration", "2000000", 0)
 	}
-	if err := fc.OpenInput(s.inputURL, s.inFmt, dict); err != nil {
+	if err := fc.OpenInput(s.inputURL, inFmt, dict); err != nil {
 		dict.Free()
 		fc.Free()
 		return fmt.Errorf("open input (reopen): %w", err)
