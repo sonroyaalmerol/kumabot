@@ -51,6 +51,8 @@ type PCMStreamer struct {
 	fifo []byte
 }
 
+var debugOnce int32
+
 func pcmDebugf(format string, args ...any) {
 	if debugOn() {
 		_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] "+format+"\n", args...)
@@ -422,22 +424,21 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	s.dstFrame.Unref()
 	inNb := src.NbSamples()
 
+	// Safe to use Delay() after first init-convert
 	delay := s.swr.Delay(int64(s.inRate))
 	outSamples := int(((delay+int64(inNb))*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
 	if outSamples <= 0 {
 		outSamples = 1
 	}
-	// Defensive cap to avoid pathological sizes
 	if outSamples > (inNb+2048)*3 {
 		outSamples = (inNb + 2048) * 3
 	}
 
 	// Configure dst frame
 	s.dstFrame.SetNbSamples(outSamples)
-	s.dstFrame.SetChannelLayout(s.targetLayout)
-	s.dstFrame.SetSampleRate(s.targetRate)
-	s.dstFrame.SetSampleFormat(s.targetFormat) // S16
-
+	s.dstFrame.SetChannelLayout(s.targetLayout) // Stereo
+	s.dstFrame.SetSampleRate(s.targetRate)      // 48000
+	s.dstFrame.SetSampleFormat(s.targetFormat)  // S16 (little-endian)
 	if err := s.dstFrame.AllocBuffer(0); err != nil {
 		return fmt.Errorf("dst alloc buffer: %w", err)
 	}
@@ -449,27 +450,38 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 
 	nb := s.dstFrame.NbSamples()
 	ch := s.targetNbChans
-	if nb <= 0 || ch <= 0 {
-		return nil
+	if nb <= 0 || ch != 2 {
+		return fmt.Errorf("unexpected nb/ch: nb=%d ch=%d", nb, ch)
 	}
 
-	// Get plane 0
+	// Inspect format/planarity
+	outFmt := s.dstFrame.SampleFormat()
+	outRate := s.dstFrame.SampleRate()
+	outCh := s.dstFrame.ChannelLayout().Channels()
+	if outFmt != astiav.SampleFormatS16 || outRate != 48000 || outCh != 2 {
+		return fmt.Errorf("unexpected dst params fmt=%s rate=%d ch=%d", outFmt.String(), outRate, outCh)
+	}
+
+	// Plane 0
 	p0, err := s.dstFrame.Data().Bytes(0)
 	if err != nil {
 		return fmt.Errorf("dst plane0 bytes: %w", err)
 	}
 
-	// Detect planar: if plane 1 exists and has data, treat as planar
+	// Detect planar
 	isPlanar := false
-	if ch > 1 {
-		if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
-			isPlanar = true
-		}
+	if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
+		isPlanar = true
+	}
+
+	// Log only for the first few frames to diagnose
+	if debugOn() {
+		// log once per process for a couple of frames
 	}
 
 	var tmp []byte
 	if !isPlanar {
-		// Packed interleaved S16: expect nb * ch * 2 bytes on plane 0
+		// Packed interleaved S16: length should be >= nb * ch * 2
 		total := nb * ch * 2
 		if len(p0) < total {
 			return fmt.Errorf("packed dst too small: got %d, want %d", len(p0), total)
@@ -477,7 +489,7 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		tmp = make([]byte, total)
 		copy(tmp, p0[:total])
 	} else {
-		// Planar S16P: interleave from per-channel planes into LRLR...
+		// Planar S16P: plane per channel; each plane must have at least nb*2 bytes
 		planes := make([][]byte, ch)
 		planes[0] = p0
 		for c := 1; c < ch; c++ {
@@ -487,7 +499,6 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 			}
 			planes[c] = pc
 		}
-		// Each plane must have at least nb * 2 bytes (S16)
 		for c := 0; c < ch; c++ {
 			need := nb * 2
 			if len(planes[c]) < need {
@@ -496,17 +507,19 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		}
 		total := nb * ch * 2
 		tmp = make([]byte, total)
+		// Interleave: little-endian 16-bit
 		for sidx := 0; sidx < nb; sidx++ {
-			for c := 0; c < ch; c++ {
-				srcOff := sidx * 2
-				dstOff := (sidx*ch + c) * 2
-				copy(tmp[dstOff:dstOff+2], planes[c][srcOff:srcOff+2])
-			}
+			// LR sample sidx
+			dstOffL := (sidx*ch + 0) * 2
+			dstOffR := (sidx*ch + 1) * 2
+			srcOff := sidx * 2
+			copy(tmp[dstOffL:dstOffL+2], planes[0][srcOff:srcOff+2])
+			copy(tmp[dstOffR:dstOffR+2], planes[1][srcOff:srcOff+2])
 		}
 	}
 
 	// Append to FIFO and emit 960-sample frames
-	const frameBytes = 960 * 2 * 2 // samples/ch * channels * bytes/sample
+	const frameBytes = 960 * 2 * 2
 	s.fifo = append(s.fifo, tmp...)
 	for len(s.fifo) >= frameBytes {
 		chunk := s.fifo[:frameBytes]
