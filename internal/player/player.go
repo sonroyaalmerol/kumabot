@@ -200,6 +200,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		p.playCancel = nil
 	}
 
+	// Resolve seek/to
 	var seek *int
 	var to *int
 	pos := 0
@@ -220,6 +221,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		pos = cur.Offset
 	}
 
+	// Resolve input URL
 	inputURL := ""
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
@@ -239,10 +241,12 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		inputURL = mu.URL
 	}
 
+	// Playback-scoped context
 	playCtx, playCancel := context.WithCancel(ctx)
 	p.playCtx = playCtx
 	p.playCancel = playCancel
 
+	// Start PCM decode
 	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to)
 	if err != nil {
 		playCancel()
@@ -250,6 +254,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
+	// Create Opus encoder
 	enc, err := stream.NewEncoder()
 	if err != nil {
 		pcm.Close()
@@ -258,90 +263,13 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
-	// Opus packet ring
-	const ringCap = 32
-	type opusPkt struct {
-		b     []byte
-		n     int
-		pts48 int64 // media time corresponding to start of this packet
-	}
-	ring := make([]opusPkt, ringCap)
-	for i := range ring {
-		ring[i].b = make([]byte, 4096)
-	}
-	var rHead, rTail, rSize int
-	ringMu := sync.Mutex{}
-	ringCond := sync.NewCond(&ringMu)
-	eos := false
-
-	pushPacket := func(pkt []byte, pts48 int64) error {
-		ringMu.Lock()
-		defer ringMu.Unlock()
-		if eos {
-			return nil
-		}
-		if rSize == ringCap {
-			// drop oldest to limit latency
-			rTail = (rTail + 1) % ringCap
-			rSize--
-		}
-		dst := &ring[rHead]
-		if len(pkt) > len(dst.b) {
-			dst.b = make([]byte, len(pkt))
-		}
-		copy(dst.b, pkt)
-		dst.n = len(pkt)
-		dst.pts48 = pts48
-		rHead = (rHead + 1) % ringCap
-		rSize++
-		ringCond.Signal()
-		return nil
-	}
-
-	// Encode goroutine: consumes framed PCM with PTS and emits Opus with PTS
-	go func() {
-		defer func() {
-			pcm.Close()
-			enc.Close()
-			ringMu.Lock()
-			eos = true
-			ringCond.Broadcast()
-			ringMu.Unlock()
-		}()
-
-		r := bufio.NewReaderSize(pcm.Stdout(), 128*1024)
-		framePCM := make([]byte, enc.FrameBytes())
-		for {
-			f, err := readPCMFrame(r)
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					_ = enc.Flush(func(_ []byte) error { return nil })
-				}
-				return
-			}
-			// Safety: expect exactly one opus frame worth per PCMFrame
-			if len(f.data) != enc.FrameBytes() || f.nbSamples != 960 {
-				// If ever mismatched, split/accumulate here (not expected with our streamer)
-				continue
-			}
-			copy(framePCM, f.data)
-			curPTS48 := f.pts48
-			err = enc.EncodeFrame(framePCM, func(pkt []byte) error {
-				return pushPacket(pkt, curPTS48)
-			})
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	// Update state before sending
 	p.Status = StatusPlaying
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
 	p.PositionSec = pos
 
-	// Sender: schedule by media PTS
+	// Sender goroutine: on-demand encode and send by media PTS
 	go func(vc *discordgo.VoiceConnection, startedAt int, cancel context.CancelFunc) {
 		defer func() {
 			p.mu.Lock()
@@ -349,6 +277,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 			p.mu.Unlock()
 		}()
 
+		// Wait voice connection ready
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
 			select {
@@ -364,10 +293,19 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		_ = vc.Speaking(true)
 		defer vc.Speaking(false)
 
+		// Ensure we release resources when done
+		defer func() {
+			enc.Close()
+			pcm.Close()
+			cancel()
+		}()
+
+		r := bufio.NewReaderSize(pcm.Stdout(), 128*1024)
+		framePCM := make([]byte, enc.FrameBytes())
+
 		var wall0 time.Time
 		var media0 int64
 		var started bool
-		var lastSentPTS48 int64
 
 		updatePosition := func(pts48 int64) {
 			sec := int(pts48 / 48000)
@@ -377,55 +315,57 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		}
 
 		for {
-			// Pop one packet
-			ringMu.Lock()
-			for rSize == 0 && !eos {
-				if playCtx.Err() != nil {
-					ringMu.Unlock()
-					return
-				}
-				ringCond.Wait()
-			}
-			if rSize == 0 && eos {
-				ringMu.Unlock()
+			// Read exactly one 960-sample PCM frame with its PTS
+			f, err := readPCMFrame(r)
+			if err != nil {
+				// Do NOT flush encoder for fixed 20ms packets
+				// Exit gracefully on EOF or other error
 				return
 			}
-			pkt := ring[rTail]
-			rTail = (rTail + 1) % ringCap
-			rSize--
-			ringMu.Unlock()
 
 			if !started {
 				started = true
 				wall0 = time.Now()
-				media0 = pkt.pts48
-				// sync UI position to media
-				updatePosition(pkt.pts48)
+				media0 = f.pts48
+				updatePosition(f.pts48)
 				p.mu.Lock()
 				p.startTracking(startedAt)
 				p.mu.Unlock()
 			}
 
-			// Target time based on media PTS
-			// target = wall0 + (pkt.pts48 - media0)/48000
-			offset := time.Duration((pkt.pts48 - media0) * int64(time.Second) / 48000)
+			// Prepare PCM for encoder
+			copy(framePCM, f.data)
+
+			// Encode exactly one packet
+			var outPkt []byte
+			err = enc.EncodeFrame(framePCM, func(pkt []byte) error {
+				outPkt = append(outPkt[:0], pkt...)
+				return nil
+			})
+			if err != nil {
+				return
+			}
+			if len(outPkt) == 0 {
+				// Shouldn't happen with 960-sample frames; skip if it does
+				continue
+			}
+
+			// Schedule send by media PTS
+			offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
 			target := wall0.Add(offset)
 			now := time.Now()
 			if target.After(now) {
 				time.Sleep(target.Sub(now))
-			} else {
-				// If we are late by more than one frame, we could consider dropping
-				// to catch up. For now, we just send immediately.
 			}
 
+			// Send
 			select {
 			case <-playCtx.Done():
 				return
-			case vc.OpusSend <- pkt.b[:pkt.n]:
-				lastSentPTS48 = pkt.pts48
-				updatePosition(lastSentPTS48)
+			case vc.OpusSend <- outPkt:
+				updatePosition(f.pts48)
 			case <-time.After(200 * time.Millisecond):
-				// Drop if blocked, do not rewind schedule
+				// Drop if blocked; schedule continues (rare)
 			}
 		}
 	}(p.Conn, pos, playCancel)
