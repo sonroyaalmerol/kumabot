@@ -803,7 +803,7 @@ func (h *CommandHandler) cmdPause(s *discordgo.Session, i *discordgo.Interaction
 		h.reply(s, i, "not currently playing", true)
 		return
 	}
-	if err := player.PauseCmd(); err != nil {
+	if err := player.Pause(); err != nil {
 		slog.Debug("pause failed", "guildID", i.GuildID, "err", err)
 		h.reply(s, i, err.Error(), true)
 		return
