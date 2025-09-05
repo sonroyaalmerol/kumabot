@@ -63,6 +63,9 @@ type PCMStreamer struct {
 
 	resumeAt48 int64 // if >=0, trim decoded audio until this sample index (48k)
 	cfWindow   int   // samples per channel for crossfade, default 960 (20ms)
+
+	// drain PTS (48k) separate from production cursor to stamp headers
+	drainPTS48 int64
 }
 
 var debugOnce int32
@@ -324,6 +327,25 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 		_ = s.pw.Close()
 	}()
 
+	// Start JB drainer that writes framed PCM to pipe
+	go func(ctx context.Context) {
+		for {
+			frame, err := s.drainFromJB(ctx)
+			if err != nil {
+				return
+			}
+			pts := s.drainPTS48
+			if err := writePCMFrame(s.pw, PCMFrame{
+				Data:      frame,
+				PTS48:     pts,
+				NbSamples: 960,
+			}); err != nil {
+				return
+			}
+			s.drainPTS48 += 960
+		}
+	}(ctx)
+
 	if seek != nil && *seek > 0 {
 		tb := s.audioStream.TimeBase()
 		ts := int64(float64(*seek) / tb.Float64())
@@ -574,6 +596,7 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 		}
 		s.firstPTS48 = astiav.RescaleQ(inPTS, s.timeBase, astiav.NewRational(1, 48000))
 		s.outPTS48Next = s.firstPTS48
+		s.drainPTS48 = s.firstPTS48
 		s.gotFirstPTS = true
 	}
 
