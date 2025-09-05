@@ -609,13 +609,6 @@ func (p *Player) stopPlayLocked() {
 
 	// cancel first so the loop stops
 	sess.cancel()
-	// best-effort close of resources
-	if sess.enc != nil {
-		sess.enc.Close()
-	}
-	if sess.pcm != nil {
-		sess.pcm.Close()
-	}
 
 	// wait for sender goroutine to exit without holding the lock
 	done := sess.doneCh
@@ -665,11 +658,11 @@ func (p *Player) sendLoop(
 	startPos int,
 	sess *playSession,
 ) {
-	defer close(sess.doneCh)
 	defer func() {
 		sess.enc.Close()
 		sess.pcm.Close()
 		sess.cancel()
+		close(sess.doneCh)
 	}()
 
 	// Wait voice connection ready
