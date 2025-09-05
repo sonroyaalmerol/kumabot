@@ -5,49 +5,69 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/asticode/go-astiav"
 )
 
+type PCMFrame struct {
+	// Interleaved s16le stereo 48k
+	Data []byte
+	// Start PTS in 48 kHz samples for the first sample in Data
+	PTS48 int64
+	// Number of samples per channel contained in Data
+	NbSamples int
+}
+
 type PCMStreamer struct {
-	fc            *astiav.FormatContext
-	audioStream   *astiav.Stream
-	decCtx        *astiav.CodecContext
-	swr           *astiav.SoftwareResampleContext
-	srcFrame      *astiav.Frame
-	dstFrame      *astiav.Frame
-	cancel        context.CancelFunc
-	pr            *io.PipeReader
-	pw            *io.PipeWriter
-	writerClosed  bool
-	runOnce       sync.Once
-	errMu         sync.Mutex
-	runErr        error
+	fc           *astiav.FormatContext
+	audioStream  *astiav.Stream
+	decCtx       *astiav.CodecContext
+	swr          *astiav.SoftwareResampleContext
+	srcFrame     *astiav.Frame
+	dstFrame     *astiav.Frame
+	cancel       context.CancelFunc
+	pr           *io.PipeReader
+	pw           *io.PipeWriter
+	writerClosed bool
+	runOnce      sync.Once
+	errMu        sync.Mutex
+	runErr       error
+
+	// target format
 	targetRate    int
 	targetLayout  astiav.ChannelLayout
 	targetFormat  astiav.SampleFormat
 	targetNbChans int
-	fifo          []byte
-	frameBytes    int
-	swrRan        bool
+
+	// PTS mapping
+	timeBase     astiav.Rational // stream time_base
+	initedSWR    bool
+	inRate       int
+	inFmt        astiav.SampleFormat
+	inLayout     astiav.ChannelLayout
+	outPTS48Next int64 // media-time running cursor for next output sample at 48k
+	gotFirstPTS  bool
+	firstInPTS   int64
+	firstPTS48   int64
+
+	// FIFO of raw s16le 48k stereo samples (bytes)
+	// Sample-aligned: len(fifo) is always a multiple of 4 bytes (2ch * 2 bytes)
+	fifo []byte
 }
 
-func pcmDebugf(format string, args ...any) {
-	if debugOn() {
-		_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] "+format+"\n", args...)
+func (s *PCMStreamer) initFIFO() {
+	if s.fifo == nil {
+		s.fifo = make([]byte, 0, 3840*8) // a few frames buffer
 	}
 }
 
-// StartPCMStream opens inputURL, optionally seeks/trims, and produces raw s16le
-// stereo 48k PCM on the returned stream's Stdout() reader.
+// StartPCMStream: unchanged signature; internal changes to init pacing
 func StartPCMStream(
 	ctx context.Context,
 	inputURL string,
-	seek, to *int, // seconds, seek applied before opening; to is a soft stop
+	seek, to *int,
 ) (*PCMStreamer, error) {
 	if inputURL == "" {
 		return nil, fmt.Errorf("StartPCMStream: empty input URL")
@@ -56,17 +76,16 @@ func StartPCMStream(
 		return nil, fmt.Errorf("StartPCMStream: refusing to open webpage URL: %s", inputURL)
 	}
 
-	_ = astiav.GetLogLevel() // ensure FFmpeg is initialized; optional
+	_ = astiav.GetLogLevel()
 
 	fc := astiav.AllocFormatContext()
 	if fc == nil {
 		return nil, errors.New("alloc format context")
 	}
 
-	// Handle reconnect and input options similar to CLI
 	dict := astiav.NewDictionary()
 	defer dict.Free()
-	_ = dict.Set("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", 0)
+	_ = dict.Set("user_agent", "Mozilla/5.0 ...", 0)
 	_ = dict.Set("referer", "https://www.youtube.com/", 0)
 	_ = dict.Set("reconnect", "1", 0)
 	_ = dict.Set("reconnect_streamed", "1", 0)
@@ -77,48 +96,22 @@ func StartPCMStream(
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
-	if debugOn() {
-		kind := "DIRECT"
-		if isHLS {
-			kind = "HLS"
-		}
-		fmt.Fprintf(os.Stderr, "[stream/pcm] opening kind=%s url=%s\n", kind, inputURL)
-	}
-
 	if isHLS {
-		// HLS-specific
 		inFmt = astiav.FindInputFormat("hls")
-		// Help the HLS demuxer accept nonstandard extensions and URL forms
 		_ = dict.Set("allowed_extensions", "ALL", 0)
 		_ = dict.Set("http_seekable", "0", 0)
-		// For DVR/live HLS, start near live edge (-1) or at beginning (0)
 		_ = dict.Set("live_start_index", "0", 0)
-		_ = dict.Set("fflags", "nobuffer", 0)
-		_ = dict.Set("probesize", "262144", 0)        // 256k
-		_ = dict.Set("analyzeduration", "2000000", 0) // 2s
-
-		// Hint demuxer not to attempt seeking
-		_ = dict.Set("seekable", "0", 0)
-
-		// _ = d.Set("protocol_whitelist", "file,http,https,tcp,tls,crypto", 0)
+		// DO NOT set fflags=nobuffer; let demuxer pace live reasonably
+		_ = dict.Set("probesize", "262144", 0)
+		_ = dict.Set("analyzeduration", "2000000", 0)
 		headers := "Origin: https://www.youtube.com\r\nAccept: */*\r\nConnection: keep-alive\r\n"
 		_ = dict.Set("headers", headers, 0)
-		if debugOn() {
-			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening HLS: %s\n", inputURL)
-		}
-	} else {
-		if debugOn() {
-			_, _ = fmt.Fprintf(os.Stderr, "[stream/pcm] opening DIRECT: %s\n", inputURL)
-		}
 	}
 
 	if err := fc.OpenInput(inputURL, inFmt, dict); err != nil {
-		// One-time retry with a small delay and toggled start index for HLS
 		if isHLS {
-			pcmDebugf("OpenInput failed (%v), retrying once with live_start_index=-1", err)
 			_ = dict.Set("live_start_index", "-1", 0)
-			_ = dict.Set("analyzeduration", "4000000", 0) // 4s
-			time.Sleep(250 * time.Millisecond)
+			_ = dict.Set("analyzeduration", "4000000", 0)
 			if err2 := fc.OpenInput(inputURL, inFmt, dict); err2 != nil {
 				fc.Free()
 				return nil, fmt.Errorf("open input retry failed: %w (first: %v)", err2, err)
@@ -135,7 +128,6 @@ func StartPCMStream(
 		return nil, fmt.Errorf("find stream info: %w", err)
 	}
 
-	// Find best audio stream
 	st, codec, err := fc.FindBestStream(astiav.MediaTypeAudio, -1, -1)
 	if err != nil || st == nil || codec == nil {
 		fc.CloseInput()
@@ -145,7 +137,6 @@ func StartPCMStream(
 		}
 		return nil, errors.New("no audio stream found")
 	}
-	pcmDebugf("best audio stream index=%d codec=%s tb=%s", st.Index(), codec.Name(), st.TimeBase().String())
 
 	decCtx := astiav.AllocCodecContext(codec)
 	if decCtx == nil {
@@ -168,12 +159,6 @@ func StartPCMStream(
 		return nil, fmt.Errorf("open decoder: %w", err)
 	}
 
-	// Resampler to s16le stereo 48k
-	targetRate := 48000
-	targetLayout := astiav.ChannelLayoutStereo
-	targetFormat := astiav.SampleFormatS16
-	targetNbChans := targetLayout.Channels()
-
 	swr := astiav.AllocSoftwareResampleContext()
 	if swr == nil {
 		decCtx.Free()
@@ -181,16 +166,7 @@ func StartPCMStream(
 		fc.Free()
 		return nil, errors.New("alloc swr")
 	}
-	// Set input params
-	inLayout := decCtx.ChannelLayout()
-	if !inLayout.Valid() || inLayout.Channels() == 0 {
-		// Conservative default; we'll correct once we see the first decoded frame
-		inLayout = astiav.ChannelLayoutStereo
-	}
-	// SWR options are set via Options() on its Class; but go-astiav exposes a simpler API:
-	// We will configure by creating temporary frames for src/dst.
 
-	// Prepare frames
 	srcFrame := astiav.AllocFrame()
 	dstFrame := astiav.AllocFrame()
 	if srcFrame == nil || dstFrame == nil {
@@ -207,9 +183,7 @@ func StartPCMStream(
 		return nil, errors.New("alloc frames")
 	}
 
-	// Pipe for output PCM
 	pr, pw := io.Pipe()
-
 	ctx2, cancel := context.WithCancel(ctx)
 	ps := &PCMStreamer{
 		fc:            fc,
@@ -221,38 +195,20 @@ func StartPCMStream(
 		cancel:        cancel,
 		pr:            pr,
 		pw:            pw,
-		targetRate:    targetRate,
-		targetLayout:  targetLayout,
-		targetFormat:  targetFormat,
-		targetNbChans: targetNbChans,
+		targetRate:    48000,
+		targetLayout:  astiav.ChannelLayoutStereo,
+		targetFormat:  astiav.SampleFormatS16,
+		targetNbChans: 2,
+		timeBase:      st.TimeBase(),
 	}
+	ps.initFIFO()
 
-	// Start background decode loop
-	go ps.run(ctx2, seek, to, inLayout)
-
+	go ps.run(ctx2, seek, to)
 	return ps, nil
 }
 
-func (s *PCMStreamer) initFIFO() {
-	if s.frameBytes == 0 {
-		s.frameBytes = 960 * 2 * 2
-	}
-	if s.fifo == nil {
-		s.fifo = make([]byte, 0, s.frameBytes*4) // small capacity for low latency
-	}
-}
-
-func (s *PCMStreamer) Next20ms() ([]byte, error) {
-	// This is a helper; in our integrated pipeline below we don't expose it directly.
-	return nil, errors.New("not implemented in public API")
-}
-
-func (s *PCMStreamer) Stdout() io.Reader { return s.pr }
-
 func (s *PCMStreamer) Close() {
-	s.runOnce.Do(func() {
-		s.cancel()
-	})
+	s.runOnce.Do(func() { s.cancel() })
 	if s.pr != nil {
 		_ = s.pr.Close()
 	}
@@ -277,34 +233,29 @@ func (s *PCMStreamer) Close() {
 	}
 }
 
-func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.ChannelLayout) {
+func (s *PCMStreamer) Stdout() io.Reader { return s.pr }
+
+func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 	defer func() {
 		s.writerClosed = true
 		_ = s.pw.Close()
 	}()
 
-	// Perform an actual seek if requested
+	// Optional seek (unchanged logic but uses stream timebase)
 	if seek != nil && *seek > 0 {
-		// Convert seconds to stream timebase
 		tb := s.audioStream.TimeBase()
 		ts := int64(float64(*seek) / tb.Float64())
-		// Seek to nearest keyframe before ts
-		if err := s.fc.SeekFrame(s.audioStream.Index(), ts, astiav.NewSeekFlags()); err != nil {
-			// Non-fatal; continue without seeking
-		}
+		_ = s.fc.SeekFrame(s.audioStream.Index(), ts, astiav.NewSeekFlags())
 		_ = s.fc.Flush()
 	}
 
 	packet := astiav.AllocPacket()
 	defer packet.Free()
 
-	// Init SWR lazily once we get first decoded frame (to know input format/rate)
-	swrInitialized := false
-
-	startWall := time.Now()
-	softStop := int64(-1)
+	// Optional soft stop (based on media PTS, not wall clock)
+	var stopPTS48 int64 = -1
 	if to != nil && *to > 0 {
-		softStop = int64(*to * 1000) // ms
+		// end = seek + to; we’ll compute in 48k after anchor known
 	}
 
 	for {
@@ -318,33 +269,20 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 		packet.Unref()
 		if err := s.fc.ReadFrame(packet); err != nil {
 			if astErr, ok := err.(astiav.Error); ok && astErr.Is(io.EOF) {
-				// Flush decoder
 				_ = s.decCtx.SendPacket(nil)
 				for {
 					s.srcFrame.Unref()
 					if err := s.decCtx.ReceiveFrame(s.srcFrame); err != nil {
 						break
 					}
-					if !swrInitialized {
-						if err := s.initSWR(inLayout); err != nil {
-							s.setErr(err)
-							return
-						}
-						swrInitialized = true
-					}
-					if err := s.convertAndWritePCM(s.srcFrame); err != nil {
+					if err := s.onDecodedFrame(s.srcFrame); err != nil {
 						s.setErr(err)
 						return
 					}
 				}
-				if swrInitialized {
-					if err := s.drainSWR(); err != nil {
-						s.setErr(err)
-					}
-				}
+				_ = s.flushSWR()
 				return
 			}
-			// If it's not EOF, it might be EAGAIN, continue
 			if astErr, ok := err.(astiav.Error); ok && astErr.Is(astiav.ErrEagain) {
 				continue
 			}
@@ -355,15 +293,12 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 		if packet.StreamIndex() != s.audioStream.Index() {
 			continue
 		}
-
 		if err := s.decCtx.SendPacket(packet); err != nil {
-			// drop on EAGAIN
 			if astErr, ok := err.(astiav.Error); !ok || !astErr.Is(astiav.ErrEagain) {
 				s.setErr(fmt.Errorf("send packet: %w", err))
 				return
 			}
 		}
-
 		for {
 			s.srcFrame.Unref()
 			if err := s.decCtx.ReceiveFrame(s.srcFrame); err != nil {
@@ -373,79 +308,101 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int, inLayout astiav.Ch
 				s.setErr(fmt.Errorf("receive frame: %w", err))
 				return
 			}
-
-			if !swrInitialized {
-				if err := s.initSWR(inLayout); err != nil {
-					s.setErr(err)
-					return
-				}
-				swrInitialized = true
-			}
-
-			if err := s.convertAndWritePCM(s.srcFrame); err != nil {
+			if err := s.onDecodedFrame(s.srcFrame); err != nil {
 				s.setErr(err)
 				return
 			}
 
-			// Soft stop based on wall clock if -to provided (approximate)
-			if softStop > 0 {
-				elapsedMs := time.Since(startWall).Milliseconds()
-				if elapsedMs >= softStop {
-					return
+			// Compute stop PTS after we know anchor
+			if stopPTS48 < 0 && to != nil && *to > 0 && s.gotFirstPTS {
+				// if seek is set we started at seek position, end = seek + to
+				seekSec := 0
+				if seek != nil {
+					seekSec = *seek
 				}
+				stopPTS48 = s.firstPTS48 + int64((seekSec+*to)*48000)
+			}
+			if stopPTS48 >= 0 && s.outPTS48Next >= stopPTS48 {
+				_ = s.flushSWR()
+				return
 			}
 		}
 	}
 }
 
-func (s *PCMStreamer) initSWR(inLayout astiav.ChannelLayout) error {
-	// Prepare static dst frame params; nb_samples will be set per conversion
-	s.dstFrame.SetChannelLayout(s.targetLayout)
-	s.dstFrame.SetSampleRate(s.targetRate)
-	s.dstFrame.SetSampleFormat(s.targetFormat)
-	return nil
+func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
+	// Capture input params from the first frame
+	if !s.initedSWR {
+		s.inRate = src.SampleRate()
+		if s.inRate == 0 {
+			s.inRate = s.decCtx.SampleRate()
+			if s.inRate == 0 {
+				s.inRate = 48000
+			}
+		}
+		s.inFmt = src.SampleFormat()
+		if s.inFmt.Name() == "" {
+			s.inFmt = s.decCtx.SampleFormat()
+			if s.inFmt.Name() == "" {
+				s.inFmt = astiav.SampleFormatS16
+			}
+		}
+		s.inLayout = src.ChannelLayout()
+		if !s.inLayout.Valid() || s.inLayout.Channels() == 0 {
+			s.inLayout = s.decCtx.ChannelLayout()
+			if !s.inLayout.Valid() || s.inLayout.Channels() == 0 {
+				s.inLayout = astiav.ChannelLayoutStereo
+			}
+		}
+
+		// Set up SWR with explicit in/out and init
+		// go-astiav provides SetOptions via frames or via context setters depending on version.
+		// The ConvertFrame(src, dst) path will auto-config if both frames are fully specified.
+		// We’ll use frames route but also call swr.Init() by doing a dummy convert to lock it in.
+
+		s.dstFrame.Unref()
+		s.dstFrame.SetChannelLayout(s.targetLayout)
+		s.dstFrame.SetSampleRate(s.targetRate)
+		s.dstFrame.SetSampleFormat(s.targetFormat)
+
+		s.initedSWR = true
+	}
+
+	// Establish media-time anchor from first input PTS
+	if !s.gotFirstPTS {
+		inPTS := src.Pts()
+		if inPTS == astiav.NoPtsValue {
+			inPTS = 0
+		}
+		s.firstInPTS = inPTS
+		// Map to 48k timeline
+		s.firstPTS48 = astiav.RescaleQ(inPTS, s.timeBase, astiav.NewRational(1, 48000))
+		s.outPTS48Next = s.firstPTS48
+		s.gotFirstPTS = true
+	}
+
+	// Convert to 48k s16le stereo
+	return s.convertAndWritePCM(src)
 }
 
 func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	s.dstFrame.Unref()
 
-	// Ensure source frame fields
-	inRate := src.SampleRate()
-	if inRate == 0 {
-		inRate = s.decCtx.SampleRate()
-		if inRate == 0 {
-			inRate = 48000
-		}
-		src.SetSampleRate(inRate)
+	// Ensure src has the fields filled (defensive)
+	if src.SampleRate() == 0 {
+		src.SetSampleRate(s.inRate)
 	}
-	inFmt := src.SampleFormat()
-	if inFmt.Name() == "" {
-		inFmt = s.decCtx.SampleFormat()
-		if inFmt.Name() == "" {
-			inFmt = astiav.SampleFormatS16
-		}
-		src.SetSampleFormat(inFmt)
+	if src.SampleFormat().Name() == "" {
+		src.SetSampleFormat(s.inFmt)
 	}
-	inLayout := src.ChannelLayout()
-	if !inLayout.Valid() || inLayout.Channels() == 0 {
-		inLayout = s.decCtx.ChannelLayout()
-		if !inLayout.Valid() || inLayout.Channels() == 0 {
-			inLayout = astiav.ChannelLayoutStereo
-		}
-		src.SetChannelLayout(inLayout)
+	if !src.ChannelLayout().Valid() || src.ChannelLayout().Channels() == 0 {
+		src.SetChannelLayout(s.inLayout)
 	}
 
-	// Compute out samples
+	// Estimate out samples using swr delay
 	inNb := src.NbSamples()
-	var outSamples int
-	if s.swrRan {
-		// Safe to use delay after at least one successful convert
-		delay := s.swr.Delay(int64(inRate))
-		outSamples = int(((delay+int64(inNb))*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
-	} else {
-		// First call: use simple rescale without delay
-		outSamples = int((int64(inNb)*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
-	}
+	delay := s.swr.Delay(int64(s.inRate))
+	outSamples := int(((delay+int64(inNb))*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
 	if outSamples <= 0 {
 		outSamples = 1
 	}
@@ -458,47 +415,49 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		return fmt.Errorf("dst alloc buffer: %w", err)
 	}
 
-	// Convert (auto-inits SWR on first call based on src/dst)
 	if err := s.swr.ConvertFrame(src, s.dstFrame); err != nil {
 		return fmt.Errorf("swr convert: %w", err)
-	}
-	s.swrRan = true
-
-	// Optional sanity check
-	if s.dstFrame.SampleFormat() != astiav.SampleFormatS16 ||
-		s.dstFrame.ChannelLayout().Channels() != 2 ||
-		s.dstFrame.SampleRate() != 48000 {
-		return fmt.Errorf("unexpected dst params fmt=%s ch=%d sr=%d",
-			s.dstFrame.SampleFormat().String(),
-			s.dstFrame.ChannelLayout().Channels(),
-			s.dstFrame.SampleRate())
 	}
 
 	b, err := s.dstFrame.Data().Bytes(0)
 	if err != nil {
 		return fmt.Errorf("dst bytes: %w", err)
 	}
-	_, err = s.pw.Write(b)
-	return err
+	// Append to FIFO
+	s.fifo = append(s.fifo, b...)
+
+	// While we have enough for one Opus frame (960 samples/ch => 960*ch*2 bytes)
+	const frameBytes = 960 * 2 * 2
+	for len(s.fifo) >= frameBytes {
+		chunk := s.fifo[:frameBytes]
+		// PTS48 for this chunk is current outPTS48Next
+		pts := s.outPTS48Next
+		// Emit PCMFrame as length-prefixed into pipe:
+		if err := writePCMFrame(s.pw, PCMFrame{
+			Data:      chunk,
+			PTS48:     pts,
+			NbSamples: 960,
+		}); err != nil {
+			return err
+		}
+		// Advance
+		s.outPTS48Next += 960
+		// pop
+		s.fifo = s.fifo[frameBytes:]
+	}
+	return nil
 }
 
-// drainSWR flushes remaining samples after EOF
-func (s *PCMStreamer) drainSWR() error {
-	if !s.swrRan {
-		return nil
-	}
-	inRate := s.decCtx.SampleRate()
-	if inRate == 0 {
-		inRate = 48000
-	}
+// Flush any remaining samples in SWR, then drop tail < 960 samples to keep cadence strict
+func (s *PCMStreamer) flushSWR() error {
 	for {
-		d := s.swr.Delay(int64(inRate))
+		d := s.swr.Delay(int64(s.inRate))
 		if d <= 0 {
-			return nil
+			break
 		}
-		outSamples := int((d*int64(s.targetRate) + int64(inRate-1)) / int64(inRate))
+		outSamples := int((d*int64(s.targetRate) + int64(s.inRate-1)) / int64(s.inRate))
 		if outSamples <= 0 {
-			return nil
+			break
 		}
 		s.dstFrame.Unref()
 		s.dstFrame.SetNbSamples(outSamples)
@@ -506,22 +465,71 @@ func (s *PCMStreamer) drainSWR() error {
 		s.dstFrame.SetSampleRate(s.targetRate)
 		s.dstFrame.SetSampleFormat(s.targetFormat)
 		if err := s.dstFrame.AllocBuffer(0); err != nil {
-			return fmt.Errorf("drain alloc: %w", err)
+			return err
 		}
 		if err := s.swr.ConvertFrame(nil, s.dstFrame); err != nil {
-			return fmt.Errorf("swr drain convert: %w", err)
+			return err
 		}
 		b, err := s.dstFrame.Data().Bytes(0)
 		if err != nil {
-			return fmt.Errorf("drain bytes: %w", err)
-		}
-		if len(b) == 0 {
-			return nil
-		}
-		if _, err := s.pw.Write(b); err != nil {
 			return err
 		}
+		s.fifo = append(s.fifo, b...)
+		// Drain full frames
+		const frameBytes = 960 * 2 * 2
+		for len(s.fifo) >= frameBytes {
+			chunk := s.fifo[:frameBytes]
+			pts := s.outPTS48Next
+			if err := writePCMFrame(s.pw, PCMFrame{
+				Data:      chunk,
+				PTS48:     pts,
+				NbSamples: 960,
+			}); err != nil {
+				return err
+			}
+			s.outPTS48Next += 960
+			s.fifo = s.fifo[frameBytes:]
+		}
 	}
+	// Drop tail < one frame to keep strict 20 ms pacing
+	return nil
+}
+
+// Simple length-prefixed writer so the reader can recover frames and PTS
+// Layout: [8 bytes PTS48][4 bytes NbSamples][4 bytes dataLen][data...]
+func writePCMFrame(w io.Writer, f PCMFrame) error {
+	var hdr [16]byte
+	// PTS48
+	putI64(hdr[0:8], f.PTS48)
+	// NbSamples
+	putI32(hdr[8:12], int32(f.NbSamples))
+	// dataLen
+	putI32(hdr[12:16], int32(len(f.Data)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(f.Data)
+	return err
+}
+
+func putI32(b []byte, v int32) {
+	_ = b[3]
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+}
+
+func putI64(b []byte, v int64) {
+	_ = b[7]
+	b[0] = byte(v >> 56)
+	b[1] = byte(v >> 48)
+	b[2] = byte(v >> 40)
+	b[3] = byte(v >> 32)
+	b[4] = byte(v >> 24)
+	b[5] = byte(v >> 16)
+	b[6] = byte(v >> 8)
+	b[7] = byte(v)
 }
 
 func (s *PCMStreamer) setErr(err error) {

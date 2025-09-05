@@ -3,6 +3,7 @@ package player
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"strings"
@@ -155,6 +156,30 @@ func (p *Player) MaybeAutoplayAfterAdd(
 	}
 }
 
+type framedPCM struct {
+	pts48     int64
+	nbSamples int32
+	data      []byte // 960*2*2 bytes
+}
+
+func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
+	var hdr [16]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return framedPCM{}, err
+	}
+	pts48 := int64(binary.BigEndian.Uint64(hdr[0:8]))
+	nb := int32(binary.BigEndian.Uint32(hdr[8:12]))
+	n := int(binary.BigEndian.Uint32(hdr[12:16]))
+	if n <= 0 || nb <= 0 {
+		return framedPCM{}, io.ErrUnexpectedEOF
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return framedPCM{}, err
+	}
+	return framedPCM{pts48: pts48, nbSamples: nb, data: buf}, nil
+}
+
 func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -167,22 +192,20 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return errors.New("queue empty")
 	}
 
-	// Cancel any existing playback goroutines
+	// Cancel existing playback
 	if p.playCancel != nil {
 		p.playCancel()
 		p.playCancel = nil
 	}
 
-	// Resolve seek window
 	var seek *int
 	var to *int
 	pos := 0
-
 	if p.requestedSeek != nil {
 		val := *p.requestedSeek
 		seek = &val
 		if cur.Length > 0 {
-			t := cur.Length // absolute end if known
+			t := cur.Length
 			to = &t
 		}
 		pos = val
@@ -195,7 +218,6 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		pos = cur.Offset
 	}
 
-	// Resolve input URL
 	inputURL := ""
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
@@ -208,20 +230,17 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		if err != nil {
 			return err
 		}
-
 		mu := stream.PickMediaURL(info)
 		if mu.URL == "" {
-			return errors.New("no usable media URL (direct or HLS)")
+			return errors.New("no usable media URL")
 		}
 		inputURL = mu.URL
 	}
 
-	// Build a playback-scoped context so we can cancel from Pause/Stop/etc.
 	playCtx, playCancel := context.WithCancel(ctx)
 	p.playCtx = playCtx
 	p.playCancel = playCancel
 
-	// Start PCM decode (in-process FFmpeg)
 	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to)
 	if err != nil {
 		playCancel()
@@ -229,7 +248,6 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
-	// Create Opus encoder
 	enc, err := stream.NewEncoder()
 	if err != nil {
 		pcm.Close()
@@ -238,83 +256,78 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		return err
 	}
 
-	// Small jitter buffer (ring) for opus packets
-	const ringCap = 8 // tiny buffer to absorb jitter
+	// Opus packet ring
+	const ringCap = 32
 	type opusPkt struct {
-		b []byte // backing array reused; data copied per packet
-		n int    // length
+		b    []byte
+		n    int
+		pts48 int64 // media time corresponding to start of this packet
 	}
 	ring := make([]opusPkt, ringCap)
 	for i := range ring {
-		ring[i].b = make([]byte, 4096) // max opus packet we handle
+		ring[i].b = make([]byte, 4096)
 	}
 	var rHead, rTail, rSize int
 	ringMu := sync.Mutex{}
 	ringCond := sync.NewCond(&ringMu)
+	eos := false
 
-	pushPacket := func(pkt []byte) error {
+	pushPacket := func(pkt []byte, pts48 int64) error {
 		ringMu.Lock()
 		defer ringMu.Unlock()
+		if eos {
+			return nil
+		}
 		if rSize == ringCap {
-			// drop oldest to keep latency bounded
+			// drop oldest to limit latency
 			rTail = (rTail + 1) % ringCap
 			rSize--
 		}
 		dst := &ring[rHead]
 		if len(pkt) > len(dst.b) {
-			// grow once if needed (very rare)
 			dst.b = make([]byte, len(pkt))
 		}
 		copy(dst.b, pkt)
 		dst.n = len(pkt)
+		dst.pts48 = pts48
 		rHead = (rHead + 1) % ringCap
 		rSize++
 		ringCond.Signal()
 		return nil
 	}
 
-	// PCM frame working buffer (3840 bytes = 960*2*2)
-	frameBytes := enc.FrameBytes()
-	framePCM := make([]byte, frameBytes)
-	fifo := make([]byte, 0, frameBytes*4)
-
-	// Decode + resample + encode goroutine
+	// Encode goroutine: consumes framed PCM with PTS and emits Opus with PTS
 	go func() {
 		defer func() {
 			pcm.Close()
 			enc.Close()
 			ringMu.Lock()
-			// Signal no more packets by setting size to -1
-			rSize = -1
+			eos = true
 			ringCond.Broadcast()
 			ringMu.Unlock()
 		}()
 
-		// Read raw PCM from pcm.Stdout() and accumulate exact 20ms frames
-		r := bufio.NewReaderSize(pcm.Stdout(), 64*1024)
-		buf := make([]byte, 32*1024)
-
+		r := bufio.NewReaderSize(pcm.Stdout(), 128*1024)
+		framePCM := make([]byte, enc.FrameBytes())
 		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				fifo = append(fifo, buf[:n]...)
-				// While we have at least one full frame, encode it
-				for len(fifo) >= frameBytes {
-					copy(framePCM, fifo[:frameBytes])
-					// shift fifo without allocating: reslice
-					fifo = fifo[frameBytes:]
-
-					if err := enc.EncodeFrame(framePCM, pushPacket); err != nil {
-						return
-					}
-				}
-			}
+			f, err := readPCMFrame(r)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
-					// Flush encoder with any tail samples (optional: pad/truncate).
-					// For strict 20ms cadence, we skip tail < one frame.
-					_ = enc.Flush(pushPacket)
+					_ = enc.Flush(func(_ []byte) error { return nil })
 				}
+				return
+			}
+			// Safety: expect exactly one opus frame worth per PCMFrame
+			if len(f.data) != enc.FrameBytes() || f.nbSamples != 960 {
+				// If ever mismatched, split/accumulate here (not expected with our streamer)
+				continue
+			}
+			copy(framePCM, f.data)
+			curPTS48 := f.pts48
+			err = enc.EncodeFrame(framePCM, func(pkt []byte) error {
+				return pushPacket(pkt, curPTS48)
+			})
+			if err != nil {
 				return
 			}
 		}
@@ -326,7 +339,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	p.LastURL = cur.URL
 	p.PositionSec = pos
 
-	// Sender goroutine: 1 opus packet every 20 ms
+	// Sender: schedule by media PTS
 	go func(vc *discordgo.VoiceConnection, startedAt int, cancel context.CancelFunc) {
 		defer func() {
 			p.mu.Lock()
@@ -334,7 +347,6 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 			p.mu.Unlock()
 		}()
 
-		// Wait for ready
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
 			select {
@@ -350,25 +362,29 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		_ = vc.Speaking(true)
 		defer vc.Speaking(false)
 
-		base := time.Now()
-		frameIdx := 0
-		started := false
+		var wall0 time.Time
+		var media0 int64
+		var started bool
+		var lastSentPTS48 int64
+
+		updatePosition := func(pts48 int64) {
+			sec := int(pts48 / 48000)
+			p.mu.Lock()
+			p.PositionSec = sec
+			p.mu.Unlock()
+		}
 
 		for {
-			// Pop one packet (block until available or EOS)
+			// Pop one packet
 			ringMu.Lock()
-			for rSize == 0 {
+			for rSize == 0 && !eos {
 				if playCtx.Err() != nil {
-					ringMu.Unlock()
-					return
-				}
-				if rSize < 0 {
 					ringMu.Unlock()
 					return
 				}
 				ringCond.Wait()
 			}
-			if rSize < 0 {
+			if rSize == 0 && eos {
 				ringMu.Unlock()
 				return
 			}
@@ -379,26 +395,35 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 
 			if !started {
 				started = true
-				base = time.Now() // align the schedule to first packet
+				wall0 = time.Now()
+				media0 = pkt.pts48
+				// sync UI position to media
+				updatePosition(pkt.pts48)
 				p.mu.Lock()
 				p.startTracking(startedAt)
 				p.mu.Unlock()
 			}
 
-			// PTS schedule: one packet every 20 ms
-			next := base.Add(time.Duration(frameIdx) * 20 * time.Millisecond)
-			dur := time.Until(next)
-			if dur > 0 {
-				time.Sleep(dur)
+			// Target time based on media PTS
+			// target = wall0 + (pkt.pts48 - media0)/48000
+			offset := time.Duration((pkt.pts48 - media0) * int64(time.Second) / 48000)
+			target := wall0.Add(offset)
+			now := time.Now()
+			if target.After(now) {
+				time.Sleep(target.Sub(now))
+			} else {
+				// If we are late by more than one frame, we could consider dropping
+				// to catch up. For now, we just send immediately.
 			}
-			frameIdx++ // always advance, even if send drops, to avoid burst
 
 			select {
 			case <-playCtx.Done():
 				return
 			case vc.OpusSend <- pkt.b[:pkt.n]:
+				lastSentPTS48 = pkt.pts48
+				updatePosition(lastSentPTS48)
 			case <-time.After(200 * time.Millisecond):
-				// Drop if blocked; we still advanced schedule to avoid racing
+				// Drop if blocked, do not rewind schedule
 			}
 		}
 	}(p.Conn, pos, playCancel)
