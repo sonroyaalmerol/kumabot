@@ -13,7 +13,7 @@ func songLink(s player.SongMetadata) string {
 	if s.Source == player.SourceHLS {
 		return fmt.Sprintf("[%s](%s)", s.Title, s.URL)
 	}
-	yid := s.URL
+	yid := s.VideoID
 	if len(yid) != 11 {
 		// If URL stored, extract id as needed or just link raw URL
 		return fmt.Sprintf("[%s](%s)", s.Title, "https://www.youtube.com/watch?v="+yid)

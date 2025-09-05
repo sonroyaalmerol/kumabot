@@ -15,6 +15,7 @@ type QueuedPlaylist struct {
 type SongMetadata struct {
 	Title       string
 	Artist      string
+	VideoID     string
 	URL         string // youtube videoId or full HLS URL
 	Length      int    // seconds
 	Offset      int    // seconds to start
