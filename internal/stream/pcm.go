@@ -53,19 +53,12 @@ type PCMStreamer struct {
 	inputURL string
 	isHLS    bool
 
-	// jitter buffer for smoothed output (PCM 48k S16 stereo, framed in 960-sample chunks)
-	jbMu       sync.Mutex
-	jb         [][]byte // each entry is exactly 3840 bytes (960*2*2)
-	jbMax      int      // capacity in frames (e.g., 20 = 400 ms)
-	jbPrefill  int      // desired prefill before draining (e.g., 5 = 100 ms)
-	resumedCFD bool     // whether next frames need crossfade
-	cfTail     []byte   // last 960 samples from before retry (3840 bytes)
+	// crossfade state
+	resumedCFD bool   // whether next frame needs crossfade
+	cfTail     []byte // last 960 samples from before retry (3840 bytes)
 
 	resumeAt48 int64 // if >=0, trim decoded audio until this sample index (48k)
 	cfWindow   int   // samples per channel for crossfade, default 960 (20ms)
-
-	// drain PTS (48k) separate from production cursor to stamp headers
-	drainPTS48 int64
 }
 
 var debugOnce int32
@@ -234,9 +227,6 @@ func StartPCMStream(
 		fifo:          make([]byte, 0, 3840*8),
 		inputURL:      inputURL,
 		isHLS:         isHLS,
-		jb:            make([][]byte, 0, 24),
-		jbMax:         20, // ~400 ms at 20ms/frame
-		jbPrefill:     5,  // ~100 ms prefill
 		resumeAt48:    -1,
 		cfWindow:      960, // 20 ms
 	}
@@ -273,78 +263,11 @@ func (s *PCMStreamer) Close() {
 	}
 }
 
-// pushFrameToJB enqueues a 3840-byte interleaved S16LE frame into jitter buffer.
-func (s *PCMStreamer) pushFrameToJB(frame []byte) {
-	if len(frame) != 960*2*2 {
-		return
-	}
-	s.jbMu.Lock()
-	if len(s.jb) < s.jbMax {
-		// Copy to avoid aliasing
-		cp := make([]byte, len(frame))
-		copy(cp, frame)
-		s.jb = append(s.jb, cp)
-	} else {
-		// Drop oldest to keep recent continuity
-		copy(s.jb[0], s.jb[1][0:0])
-		s.jb = s.jb[1:]
-		cp := make([]byte, len(frame))
-		copy(cp, frame)
-		s.jb = append(s.jb, cp)
-	}
-	s.jbMu.Unlock()
-}
-
-// drainFromJB blocks until at least one frame available and the buffer prefill
-// is satisfied (unless already started), then returns next frame.
-func (s *PCMStreamer) drainFromJB(ctx context.Context) ([]byte, error) {
-	ticker := time.NewTicker(2 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			s.jbMu.Lock()
-			n := len(s.jb)
-			if n > 0 {
-				// If not yet satisfied prefill, wait until >= jbPrefill
-				if n >= s.jbPrefill {
-					out := s.jb[0]
-					s.jb = s.jb[1:]
-					s.jbMu.Unlock()
-					return out, nil
-				}
-			}
-			s.jbMu.Unlock()
-		}
-	}
-}
-
 func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 	defer func() {
 		s.writerClosed = true
 		_ = s.pw.Close()
 	}()
-
-	// Start JB drainer that writes framed PCM to pipe
-	go func(ctx context.Context) {
-		for {
-			frame, err := s.drainFromJB(ctx)
-			if err != nil {
-				return
-			}
-			pts := s.drainPTS48
-			if err := writePCMFrame(s.pw, PCMFrame{
-				Data:      frame,
-				PTS48:     pts,
-				NbSamples: 960,
-			}); err != nil {
-				return
-			}
-			s.drainPTS48 += 960
-		}
-	}(ctx)
 
 	if seek != nil && *seek > 0 {
 		tb := s.audioStream.TimeBase()
@@ -541,19 +464,8 @@ func (s *PCMStreamer) reopenAndSeek() error {
 
 	// Arrange sample-accurate trim and crossfade
 	s.resumeAt48 = s.outPTS48Next
-	s.jbMu.Lock()
 	// capture tail for crossfade (last 20ms if available)
 	s.cfTail = nil
-	if n := len(s.jb); n > 0 {
-		last := s.jb[n-1]
-		if len(last) == 960*2*2 {
-			s.cfTail = make([]byte, len(last))
-			copy(s.cfTail, last)
-		}
-	}
-	// Clear JB so we don’t replay old frames
-	s.jb = s.jb[:0]
-	s.jbMu.Unlock()
 	s.resumedCFD = true
 	return nil
 }
@@ -596,7 +508,6 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 		}
 		s.firstPTS48 = astiav.RescaleQ(inPTS, s.timeBase, astiav.NewRational(1, 48000))
 		s.outPTS48Next = s.firstPTS48
-		s.drainPTS48 = s.firstPTS48
 		s.gotFirstPTS = true
 	}
 
@@ -789,17 +700,20 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		chunk := make([]byte, frameBytes)
 		copy(chunk, s.fifo[:frameBytes])
 		s.fifo = s.fifo[frameBytes:]
-		// Apply crossfade exactly once after resume, if we have a tail
 		if s.resumedCFD && s.cfTail != nil && len(s.cfTail) == frameBytes {
 			s.applyCrossfadeInPlace(chunk, s.cfTail, s.cfWindow)
 			s.cfTail = nil
 			s.resumedCFD = false
 		}
-		// Enqueue to jitter buffer (producer side)
-		s.pushFrameToJB(chunk)
-		// Maintain PTS for framing metadata
+		// Emit framed PCM immediately (Player handles timing)
+		if err := writePCMFrame(s.pw, PCMFrame{
+			Data:      chunk,
+			PTS48:     pts,
+			NbSamples: 960,
+		}); err != nil {
+			return err
+		}
 		s.outPTS48Next += 960
-		// Also emit framed header to pipe from a separate goroutine if not already
 	}
 	return nil
 }
@@ -904,7 +818,13 @@ func (s *PCMStreamer) flushSWR() error {
 				s.cfTail = nil
 				s.resumedCFD = false
 			}
-			s.pushFrameToJB(chunk)
+			if err := writePCMFrame(s.pw, PCMFrame{
+				Data:      chunk,
+				PTS48:     pts,
+				NbSamples: 960,
+			}); err != nil {
+				return err
+			}
 			s.outPTS48Next += 960
 		}
 	}
