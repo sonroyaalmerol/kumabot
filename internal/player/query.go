@@ -302,7 +302,7 @@ func ytInfoToMetadata(info *stream.YTDLPInfo, qp *QueuedPlaylist, split bool) []
 	base := SongMetadata{
 		Title:     info.Title,
 		Artist:    info.Uploader,
-		URL:       info.Id, // YouTube ID
+		URL:       info.Url,
 		Length:    max(0, int(info.Duration)),
 		Offset:    0,
 		Playlist:  qp,

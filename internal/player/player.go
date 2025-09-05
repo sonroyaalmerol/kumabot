@@ -33,17 +33,25 @@ type Player struct {
 	Qpos            int
 	NowPlaying      *SongMetadata
 	PositionSec     int
-	Timer           *time.Ticker
-	StopPos         chan struct{}
 	DefaultVol      int
 	LoopSong        bool
 	LoopQueue       bool
 	DisconnectTimer *time.Timer
 	LastURL         string
 
-	playCtx       context.Context
-	playCancel    context.CancelFunc
-	requestedSeek *int // absolute seek (seconds) for next Play() start
+	requestedSeek *int
+
+	curPlay *playSession
+}
+
+type playSession struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	pcm *stream.PCMStreamer
+	enc *stream.Encoder
+
+	doneCh chan struct{}
 }
 
 func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, guildID string) *Player {
@@ -54,61 +62,93 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 		guildID:    guildID,
 		Status:     StatusIdle,
 		DefaultVol: DefaultVolume,
-		StopPos:    make(chan struct{}, 1),
 	}
 }
 
 func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	// already on the same channel
 	if p.Conn != nil && p.Conn.ChannelID == channelID {
+		p.mu.Unlock()
 		return nil
 	}
-	if p.Conn != nil {
-		p.Conn.Disconnect()
-		p.Conn = nil
+	// disconnect old connection (no network work under lock)
+	old := p.Conn
+	p.Conn = nil
+	p.mu.Unlock()
+
+	if old != nil {
+		_ = old.Speaking(false)
+		old.Disconnect()
 	}
+
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 	if err != nil {
 		return err
 	}
-	p.Conn = vc
-	// Load settings for default volume
+
+	// Load settings for default volume outside lock
 	ctx := context.Background()
-	if s, err := p.repo.GetSettings(ctx, p.guildID); err == nil {
-		p.DefaultVol = s.DefaultVolume
+	defVol := DefaultVolume
+	if sset, err := p.repo.GetSettings(ctx, p.guildID); err == nil && sset != nil {
+		defVol = sset.DefaultVolume
 	}
+
+	p.mu.Lock()
+	p.Conn = vc
+	p.DefaultVol = defVol
+	// any pending idle disconnect for previous state should be canceled
+	p.cancelIdleDisconnectLocked()
+	p.mu.Unlock()
+
 	return nil
 }
 
 func (p *Player) Disconnect() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.Conn != nil {
-		p.Conn.Speaking(false)
-		p.Conn.Disconnect()
-		p.Conn = nil
-	}
+	// stop any playback
+	p.stopPlayLocked()
+
 	p.Status = StatusIdle
 	p.NowPlaying = nil
-	p.stopTracking()
+	p.PositionSec = 0
+
+	if p.DisconnectTimer != nil {
+		p.DisconnectTimer.Stop()
+		p.DisconnectTimer = nil
+	}
+
+	vc := p.Conn
+	p.Conn = nil
+	p.mu.Unlock()
+
+	if vc != nil {
+		_ = vc.Speaking(false)
+		vc.Disconnect()
+	}
 }
 
 func (p *Player) Add(song SongMetadata, immediate bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	if song.Playlist != nil || !immediate || len(p.SongQueue) == 0 {
 		p.SongQueue = append(p.SongQueue, song)
-	} else {
-		insertAt := p.Qpos + 1
-		if insertAt < 0 {
-			insertAt = 0
-		}
-		if insertAt > len(p.SongQueue) {
-			insertAt = len(p.SongQueue)
-		}
-		p.SongQueue = append(p.SongQueue[:insertAt], append([]SongMetadata{song}, p.SongQueue[insertAt:]...)...)
+		return
 	}
+
+	insertAt := p.Qpos + 1
+	if insertAt < 0 {
+		insertAt = 0
+	}
+	if insertAt > len(p.SongQueue) {
+		insertAt = len(p.SongQueue)
+	}
+
+	// insert while preserving order
+	p.SongQueue = append(p.SongQueue, SongMetadata{})      // grow by one
+	copy(p.SongQueue[insertAt+1:], p.SongQueue[insertAt:]) // shift right
+	p.SongQueue[insertAt] = song
 }
 
 func (p *Player) Clear() {
@@ -145,13 +185,12 @@ func (p *Player) QueueSize() int {
 	return len(p.SongQueue) - p.Qpos - 1
 }
 
-func (p *Player) MaybeAutoplayAfterAdd(
-	ctx context.Context,
-	s *discordgo.Session,
-) {
+func (p *Player) MaybeAutoplayAfterAdd(ctx context.Context, s *discordgo.Session) {
 	p.mu.Lock()
 	shouldPlay := p.Status != StatusPlaying && p.currentLocked() != nil
+	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
+
 	if shouldPlay {
 		go func() { _ = p.Play(ctx, s) }()
 	}
@@ -172,7 +211,6 @@ func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
 	nb := int32(binary.BigEndian.Uint32(hdr[8:12]))
 	n := int(binary.BigEndian.Uint32(hdr[12:16]))
 	if nb != 960 || n != 960*2*2 {
-		// stream guarantees 960-sample frames; if not, treat as error
 		return framedPCM{}, fmt.Errorf("bad frame sizes nb=%d n=%d", nb, n)
 	}
 	buf := make([]byte, n)
@@ -183,24 +221,23 @@ func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
 }
 
 func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
+	// Read minimal state and stop any current play under lock
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.Conn == nil {
+	vc := p.Conn
+	cur := p.currentLocked()
+	if vc == nil {
+		p.mu.Unlock()
 		return errors.New("not connected")
 	}
-	cur := p.currentLocked()
 	if cur == nil {
+		p.mu.Unlock()
 		return errors.New("queue empty")
 	}
 
-	// Cancel existing playback
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
-	}
+	// stop any existing play session
+	p.stopPlayLocked()
 
-	// Resolve seek/to
+	// resolve seek/to
 	var seek *int
 	var to *int
 	pos := 0
@@ -221,190 +258,70 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		pos = cur.Offset
 	}
 
-	// Resolve input URL
+	p.cancelIdleDisconnectLocked()
+	p.mu.Unlock()
+
+	// Resolve input URL without holding the lock
 	inputURL := ""
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
 	} else {
-		ytURL := cur.URL
-		if !strings.HasPrefix(ytURL, "http") {
-			ytURL = "https://www.youtube.com/watch?v=" + cur.URL
+		inputURL = cur.URL
+		if !strings.HasPrefix(inputURL, "http") {
+			ytURL := "https://www.youtube.com/watch?v=" + cur.URL
+			info, err := stream.YtdlpGetInfo(ctx, ytURL)
+			if err != nil {
+				return err
+			}
+			mu := stream.PickMediaURL(info)
+			if mu.URL == "" {
+				return errors.New("no usable media URL")
+			}
+			inputURL = mu.URL
 		}
-		info, err := stream.YtdlpGetInfo(ctx, ytURL)
-		if err != nil {
-			return err
-		}
-		mu := stream.PickMediaURL(info)
-		if mu.URL == "" {
-			return errors.New("no usable media URL")
-		}
-		inputURL = mu.URL
 	}
 
-	// Playback-scoped context
+	// Create playback-scoped context and resources
 	playCtx, playCancel := context.WithCancel(ctx)
-	p.playCtx = playCtx
-	p.playCancel = playCancel
-
-	// Start PCM decode
 	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to)
 	if err != nil {
 		playCancel()
-		p.playCancel = nil
 		return err
 	}
-
-	// Create Opus encoder
 	enc, err := stream.NewEncoder()
 	if err != nil {
 		pcm.Close()
 		playCancel()
-		p.playCancel = nil
 		return err
 	}
 
-	// Update state before sending
+	sess := &playSession{
+		ctx:    playCtx,
+		cancel: playCancel,
+		pcm:    pcm,
+		enc:    enc,
+		doneCh: make(chan struct{}),
+	}
+
+	// Commit the session and state if still valid
+	p.mu.Lock()
+	if p.Conn == nil || p.Conn != vc || p.currentLocked() != cur {
+		// state changed while preparing; abort
+		p.mu.Unlock()
+		sess.cancel()
+		enc.Close()
+		pcm.Close()
+		return errors.New("play aborted due to state change")
+	}
+	p.curPlay = sess
 	p.Status = StatusPlaying
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
 	p.PositionSec = pos
+	p.mu.Unlock()
 
-	// Sender goroutine: on-demand encode and send by media PTS
-	go func(vc *discordgo.VoiceConnection, startedAt int, cancel context.CancelFunc) {
-		defer func() {
-			p.mu.Lock()
-			p.stopTracking()
-			// Decide next action: loop song, loop queue, or advance/idle
-			finished := true
-			cur := p.currentLocked()
-			if finished && cur != nil {
-				if p.LoopSong {
-					// Re-seek to start
-					seek0 := 0
-					p.requestedSeek = &seek0
-					p.Status = StatusPaused
-					// unlock before starting next Play
-					p.mu.Unlock()
-					go func() { _ = p.Play(ctx, s) }()
-					return
-				}
-				// Advance Qpos according to loopQueue or normal
-				if p.LoopQueue && len(p.SongQueue) > 0 {
-					// rotate: move current to end
-					item := p.SongQueue[p.Qpos]
-					// remove current
-					p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
-					// append to end
-					p.SongQueue = append(p.SongQueue, item)
-					// keep Qpos at same index to point to new current
-				} else {
-					p.Qpos++
-				}
-				p.PositionSec = 0
-				p.Status = StatusIdle
-				p.mu.Unlock()
-				// If there is a next song, start it
-				if p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
-					_ = p.Play(ctx, s)
-				}
-				return
-			}
-			// default: just unlock
-			p.mu.Unlock()
-		}()
-
-		// Wait voice connection ready
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
-			select {
-			case <-playCtx.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-			}
-		}
-		if vc == nil || !vc.Ready {
-			return
-		}
-
-		_ = vc.Speaking(true)
-		defer vc.Speaking(false)
-
-		// Ensure we release resources when done
-		defer func() {
-			enc.Close()
-			pcm.Close()
-			cancel()
-		}()
-
-		r := bufio.NewReaderSize(pcm.Stdout(), 128*1024)
-		framePCM := make([]byte, enc.FrameBytes())
-
-		var wall0 time.Time
-		var media0 int64
-		var started bool
-
-		updatePosition := func(pts48 int64) {
-			sec := int(pts48 / 48000)
-			p.mu.Lock()
-			p.PositionSec = sec
-			p.mu.Unlock()
-		}
-
-		for {
-			// Read exactly one 960-sample PCM frame with its PTS
-			f, err := readPCMFrame(r)
-			if err != nil {
-				// Do NOT flush encoder for fixed 20ms packets
-				// Exit gracefully on EOF or other error
-				return
-			}
-
-			if !started {
-				started = true
-				wall0 = time.Now()
-				media0 = f.pts48
-				updatePosition(f.pts48)
-				p.mu.Lock()
-				p.startTracking(startedAt)
-				p.mu.Unlock()
-			}
-
-			// Prepare PCM for encoder
-			copy(framePCM, f.data)
-
-			// Encode exactly one packet
-			var outPkt []byte
-			err = enc.EncodeFrame(framePCM, func(pkt []byte) error {
-				outPkt = append(outPkt[:0], pkt...)
-				return nil
-			})
-			if err != nil {
-				return
-			}
-			if len(outPkt) == 0 {
-				// Shouldn't happen with 960-sample frames; skip if it does
-				continue
-			}
-
-			// Schedule send by media PTS
-			offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
-			target := wall0.Add(offset)
-			now := time.Now()
-			if target.After(now) {
-				time.Sleep(target.Sub(now))
-			}
-
-			// Send
-			select {
-			case <-playCtx.Done():
-				return
-			case vc.OpusSend <- outPkt:
-				updatePosition(f.pts48)
-			case <-time.After(200 * time.Millisecond):
-				// Drop if blocked; schedule continues (rare)
-			}
-		}
-	}(p.Conn, pos, playCancel)
+	// Start sender loop
+	go p.sendLoop(vc, cur, pos, sess)
 
 	return nil
 }
@@ -416,10 +333,9 @@ func (p *Player) Pause() error {
 		return errors.New("not playing")
 	}
 	p.Status = StatusPaused
-	p.stopTracking()
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
+	p.stopPlayLocked()
+	if p.Conn != nil {
+		_ = p.Conn.Speaking(false)
 	}
 	return nil
 }
@@ -427,72 +343,61 @@ func (p *Player) Pause() error {
 func (p *Player) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.stopTracking()
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
-	}
+
+	p.stopPlayLocked()
+
 	p.Status = StatusIdle
-	if p.Conn != nil {
-		p.Conn.Speaking(false)
-	}
 	p.SongQueue = nil
 	p.Qpos = 0
 	p.NowPlaying = nil
+	p.PositionSec = 0
+
+	if p.DisconnectTimer != nil {
+		p.DisconnectTimer.Stop()
+		p.DisconnectTimer = nil
+	}
+
+	if p.Conn != nil {
+		_ = p.Conn.Speaking(false)
+	}
 }
 
 func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
-	}
-	p.stopTracking()
+	p.stopPlayLocked()
 
 	if p.Qpos+n-1 >= len(p.SongQueue) {
-		// queue empty, plan disconnect if configured
+		// queue empty; stay idle and schedule disconnect
 		p.Status = StatusIdle
-		set, _ := p.repo.GetSettings(ctx, p.guildID)
-		if set != nil && set.SecondsWaitAfterEmpty != 0 {
-			if p.DisconnectTimer != nil {
-				p.DisconnectTimer.Stop()
-			}
-			p.DisconnectTimer = time.AfterFunc(time.Duration(set.SecondsWaitAfterEmpty)*time.Second, func() {
-				p.mu.Lock()
-				defer p.mu.Unlock()
-				if p.Status == StatusIdle && p.Conn != nil {
-					p.Conn.Disconnect()
-					p.Conn = nil
-				}
-			})
-		}
+		p.PositionSec = 0
+		p.mu.Unlock()
+
+		p.scheduleIdleDisconnect()
 		return nil
 	}
+
 	p.Qpos += n
 	p.PositionSec = 0
-	go func() { _ = p.Play(ctx, s) }()
-	return nil
+	p.cancelIdleDisconnectLocked()
+	p.mu.Unlock()
+
+	return p.Play(ctx, s)
 }
 
 func (p *Player) Back(ctx context.Context, s *discordgo.Session) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
-	}
-	p.stopTracking()
+	p.stopPlayLocked()
 
 	if p.Qpos-1 < 0 {
+		p.mu.Unlock()
 		return errors.New("no previous")
 	}
 	p.Qpos--
 	p.PositionSec = 0
-	go func() { _ = p.Play(ctx, s) }()
-	return nil
+	p.cancelIdleDisconnectLocked()
+	p.mu.Unlock()
+
+	return p.Play(ctx, s)
 }
 
 func (p *Player) Seek(ctx context.Context, s *discordgo.Session, posSec int) error {
@@ -513,14 +418,10 @@ func (p *Player) Seek(ctx context.Context, s *discordgo.Session, posSec int) err
 	// Set desired seek for next Play
 	p.requestedSeek = &posSec
 	p.Status = StatusPaused
-	p.stopTracking()
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
-	}
+	p.stopPlayLocked()
+	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
-	// Restart playback with absolute seek
 	return p.Play(ctx, s)
 }
 
@@ -528,37 +429,6 @@ func (p *Player) GetPosition() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.PositionSec
-}
-
-func (p *Player) startTracking(initial int) {
-	p.PositionSec = initial
-	if p.Timer != nil {
-		p.Timer.Stop()
-	}
-	p.Timer = time.NewTicker(1 * time.Second)
-	go func(t *time.Ticker, stop chan struct{}) {
-		for {
-			select {
-			case <-t.C:
-				p.mu.Lock()
-				p.PositionSec++
-				p.mu.Unlock()
-			case <-stop:
-				return
-			}
-		}
-	}(p.Timer, p.StopPos)
-}
-
-func (p *Player) stopTracking() {
-	if p.Timer != nil {
-		p.Timer.Stop()
-		p.Timer = nil
-	}
-	select {
-	case p.StopPos <- struct{}{}:
-	default:
-	}
 }
 
 func (p *Player) Queue() []SongMetadata {
@@ -607,7 +477,7 @@ func (p *Player) ToggleLoopQueue() (bool, error) {
 func (p *Player) Move(from int, to int) (SongMetadata, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Visible queue is p.SongQueue[p.qpos+1:]
+	// Visible queue is p.SongQueue[p.Qpos+1:]
 	if from < 1 || to < 1 {
 		return SongMetadata{}, errors.New("position must be at least 1")
 	}
@@ -676,48 +546,219 @@ func (p *Player) Next(ctx context.Context, s *discordgo.Session) error {
 
 func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.Status == StatusPlaying {
+		p.mu.Unlock()
 		return errors.New("already playing")
 	}
 	cur := p.currentLocked()
 	if cur == nil {
+		p.mu.Unlock()
 		return errors.New("nothing to play")
 	}
-	// Continue from current position
 	pos := p.PositionSec
 	p.requestedSeek = &pos
+	p.stopPlayLocked()
+	p.cancelIdleDisconnectLocked()
+	p.mu.Unlock()
 
-	// Ensure any lingering playback is canceled
-	if p.playCancel != nil {
-		p.playCancel()
-		p.playCancel = nil
-	}
-
-	go func() { _ = p.Play(ctx, s) }()
-	return nil
+	return p.Play(ctx, s)
 }
 
-func (p *Player) PauseCmd() error {
-	return p.Pause()
+// stopPlayLocked stops the current play session. Caller must hold p.mu.
+// It will temporarily release the lock while waiting for the goroutine to end.
+func (p *Player) stopPlayLocked() {
+	if p.curPlay == nil {
+		return
+	}
+	sess := p.curPlay
+	p.curPlay = nil
+
+	// cancel first so the loop stops
+	sess.cancel()
+	// best-effort close of resources
+	if sess.enc != nil {
+		sess.enc.Close()
+	}
+	if sess.pcm != nil {
+		sess.pcm.Close()
+	}
+
+	// wait for sender goroutine to exit without holding the lock
+	done := sess.doneCh
+	p.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+	p.mu.Lock()
 }
 
-func (p *Player) GetQueuePage(page, pageSize int) ([]SongMetadata, int) {
-	if page <= 0 {
-		page = 1
+func (p *Player) scheduleIdleDisconnect() {
+	// Load setting outside lock (can block)
+	set, _ := p.repo.GetSettings(context.Background(), p.guildID)
+	if set == nil || set.SecondsWaitAfterEmpty == 0 {
+		return
 	}
-	if pageSize <= 0 {
-		pageSize = 10
+	wait := time.Duration(set.SecondsWaitAfterEmpty) * time.Second
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.DisconnectTimer != nil {
+		p.DisconnectTimer.Stop()
 	}
-	q := p.Queue()
-	total := len(q)
-	start := (page - 1) * pageSize
-	if start >= total {
-		return []SongMetadata{}, total
+	p.DisconnectTimer = time.AfterFunc(wait, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.Status == StatusIdle && p.curPlay == nil && p.Conn != nil {
+			_ = p.Conn.Speaking(false)
+			p.Conn.Disconnect()
+			p.Conn = nil
+		}
+	})
+}
+
+func (p *Player) cancelIdleDisconnectLocked() {
+	if p.DisconnectTimer != nil {
+		p.DisconnectTimer.Stop()
+		p.DisconnectTimer = nil
 	}
-	end := start + pageSize
-	if end > total {
-		end = total
+}
+
+func (p *Player) sendLoop(
+	vc *discordgo.VoiceConnection,
+	cur *SongMetadata,
+	startPos int,
+	sess *playSession,
+) {
+	defer close(sess.doneCh)
+	defer func() {
+		sess.enc.Close()
+		sess.pcm.Close()
+		sess.cancel()
+	}()
+
+	// Wait voice connection ready
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
+		select {
+		case <-sess.ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
-	return q[start:end], total
+	if vc == nil || !vc.Ready {
+		return
+	}
+
+	_ = vc.Speaking(true)
+	defer vc.Speaking(false)
+
+	r := bufio.NewReaderSize(sess.pcm.Stdout(), 128*1024)
+	framePCM := make([]byte, sess.enc.FrameBytes())
+
+	var wall0 time.Time
+	var media0 int64
+	started := false
+
+	updatePosition := func(pts48 int64) {
+		sec := int(pts48 / 48000)
+		p.mu.Lock()
+		// only update if still current session
+		if p.curPlay == sess {
+			p.PositionSec = sec
+		}
+		p.mu.Unlock()
+	}
+
+	for {
+		f, err := readPCMFrame(r)
+		if err != nil {
+			break
+		}
+
+		if !started {
+			started = true
+			wall0 = time.Now()
+			media0 = f.pts48
+			updatePosition(f.pts48)
+
+			// ensure we record that we've started, using the existing fields
+			p.mu.Lock()
+			if p.curPlay == sess {
+				// already set to playing in Play()
+				_ = startPos // consumed
+			}
+			p.mu.Unlock()
+		}
+
+		copy(framePCM, f.data)
+
+		var outPkt []byte
+		if err := sess.enc.EncodeFrame(framePCM, func(pkt []byte) error {
+			outPkt = append(outPkt[:0], pkt...)
+			return nil
+		}); err != nil {
+			break
+		}
+		if len(outPkt) == 0 {
+			continue
+		}
+
+		offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
+		target := wall0.Add(offset)
+		if d := time.Until(target); d > 0 {
+			select {
+			case <-sess.ctx.Done():
+				return
+			case <-time.After(d):
+			}
+		}
+
+		select {
+		case <-sess.ctx.Done():
+			return
+		case vc.OpusSend <- outPkt:
+			updatePosition(f.pts48)
+		case <-time.After(200 * time.Millisecond):
+			// drop if blocked
+		}
+	}
+
+	// Finished or errored. Decide next action.
+	p.mu.Lock()
+	// If superseded by another session, just exit.
+	if p.curPlay != sess {
+		p.mu.Unlock()
+		return
+	}
+
+	// Clear current session state
+	p.curPlay = nil
+	p.Status = StatusIdle
+	p.PositionSec = 0
+
+	advance := true
+	if p.LoopSong {
+		seek0 := 0
+		p.requestedSeek = &seek0
+		advance = false
+	} else if p.LoopQueue && len(p.SongQueue) > 0 && p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
+		item := p.SongQueue[p.Qpos]
+		p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
+		p.SongQueue = append(p.SongQueue, item)
+	} else {
+		p.Qpos++
+	}
+
+	hasNext := p.Qpos >= 0 && p.Qpos < len(p.SongQueue)
+	p.mu.Unlock()
+
+	if advance && !hasNext {
+		p.scheduleIdleDisconnect()
+		return
+	}
+
+	// Start next or replay
+	_ = p.Play(context.Background(), nil)
 }
