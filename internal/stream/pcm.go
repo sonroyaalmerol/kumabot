@@ -421,8 +421,21 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 }
 
 func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
-	s.dstFrame.Unref()
+	// Ensure src fields are sane
+	if src.SampleRate() == 0 {
+		src.SetSampleRate(s.inRate)
+	}
+	if src.SampleFormat().Name() == "" {
+		src.SetSampleFormat(s.inFmt)
+	}
+	if !src.ChannelLayout().Valid() || src.ChannelLayout().Channels() == 0 {
+		src.SetChannelLayout(s.inLayout)
+	}
+
 	inNb := src.NbSamples()
+	if inNb <= 0 {
+		return nil
+	}
 
 	// Safe to use Delay() after first init-convert
 	delay := s.swr.Delay(int64(s.inRate))
@@ -430,11 +443,13 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	if outSamples <= 0 {
 		outSamples = 1
 	}
+	// Defensive cap
 	if outSamples > (inNb+2048)*3 {
 		outSamples = (inNb + 2048) * 3
 	}
 
-	// Configure dst frame
+	// Prepare dst frame for S16LE stereo 48k
+	s.dstFrame.Unref()
 	s.dstFrame.SetNbSamples(outSamples)
 	s.dstFrame.SetChannelLayout(s.targetLayout) // Stereo
 	s.dstFrame.SetSampleRate(s.targetRate)      // 48000
@@ -443,84 +458,71 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		return fmt.Errorf("dst alloc buffer: %w", err)
 	}
 
-	// Convert
+	// Convert using SWR
 	if err := s.swr.ConvertFrame(src, s.dstFrame); err != nil {
 		return fmt.Errorf("swr convert: %w", err)
 	}
 
+	// Validate dst params
 	nb := s.dstFrame.NbSamples()
-	ch := s.targetNbChans
-	if nb <= 0 || ch != 2 {
-		return fmt.Errorf("unexpected nb/ch: nb=%d ch=%d", nb, ch)
+	if nb <= 0 {
+		return nil
+	}
+	if s.dstFrame.SampleRate() != 48000 ||
+		s.dstFrame.ChannelLayout().Channels() != 2 ||
+		s.dstFrame.SampleFormat() != astiav.SampleFormatS16 {
+		return fmt.Errorf("unexpected dst params fmt=%s rate=%d ch=%d",
+			s.dstFrame.SampleFormat().String(),
+			s.dstFrame.SampleRate(),
+			s.dstFrame.ChannelLayout().Channels())
 	}
 
-	// Inspect format/planarity
-	outFmt := s.dstFrame.SampleFormat()
-	outRate := s.dstFrame.SampleRate()
-	outCh := s.dstFrame.ChannelLayout().Channels()
-	if outFmt != astiav.SampleFormatS16 || outRate != 48000 || outCh != 2 {
-		return fmt.Errorf("unexpected dst params fmt=%s rate=%d ch=%d", outFmt.String(), outRate, outCh)
-	}
-
-	// Plane 0
+	// Detect packed vs planar and interleave if needed
+	ch := 2
 	p0, err := s.dstFrame.Data().Bytes(0)
 	if err != nil {
 		return fmt.Errorf("dst plane0 bytes: %w", err)
 	}
 
-	// Detect planar
+	// Planar detected if plane 1 exists and has data
 	isPlanar := false
 	if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
 		isPlanar = true
 	}
 
-	// Log only for the first few frames to diagnose
-	if debugOn() {
-		// log once per process for a couple of frames
-	}
-
-	var tmp []byte
+	var interleaved []byte
 	if !isPlanar {
-		// Packed interleaved S16: length should be >= nb * ch * 2
+		// Packed interleaved S16LE: expect nb*ch*2 bytes in plane 0
 		total := nb * ch * 2
 		if len(p0) < total {
 			return fmt.Errorf("packed dst too small: got %d, want %d", len(p0), total)
 		}
-		tmp = make([]byte, total)
-		copy(tmp, p0[:total])
+		interleaved = make([]byte, total)
+		copy(interleaved, p0[:total])
 	} else {
-		// Planar S16P: plane per channel; each plane must have at least nb*2 bytes
-		planes := make([][]byte, ch)
-		planes[0] = p0
-		for c := 1; c < ch; c++ {
-			pc, err := s.dstFrame.Data().Bytes(c)
-			if err != nil {
-				return fmt.Errorf("dst plane%d bytes: %w", c, err)
-			}
-			planes[c] = pc
+		// Planar S16P: each plane has nb*2 bytes
+		p1, err := s.dstFrame.Data().Bytes(1)
+		if err != nil {
+			return fmt.Errorf("dst plane1 bytes: %w", err)
 		}
-		for c := 0; c < ch; c++ {
-			need := nb * 2
-			if len(planes[c]) < need {
-				return fmt.Errorf("dst plane%d too small: got %d, want %d", c, len(planes[c]), need)
-			}
+		need := nb * 2
+		if len(p0) < need || len(p1) < need {
+			return fmt.Errorf("planar dst too small: p0=%d p1=%d want=%d", len(p0), len(p1), need)
 		}
 		total := nb * ch * 2
-		tmp = make([]byte, total)
-		// Interleave: little-endian 16-bit
-		for sidx := 0; sidx < nb; sidx++ {
-			// LR sample sidx
-			dstOffL := (sidx*ch + 0) * 2
-			dstOffR := (sidx*ch + 1) * 2
-			srcOff := sidx * 2
-			copy(tmp[dstOffL:dstOffL+2], planes[0][srcOff:srcOff+2])
-			copy(tmp[dstOffR:dstOffR+2], planes[1][srcOff:srcOff+2])
+		interleaved = make([]byte, total)
+		// Interleave LR sample-by-sample: little-endian 16-bit
+		for i := 0; i < nb; i++ {
+			// L
+			copy(interleaved[(i*2+0)*2:(i*2+0)*2+2], p0[i*2:i*2+2])
+			// R
+			copy(interleaved[(i*2+1)*2:(i*2+1)*2+2], p1[i*2:i*2+2])
 		}
 	}
 
-	// Append to FIFO and emit 960-sample frames
-	const frameBytes = 960 * 2 * 2
-	s.fifo = append(s.fifo, tmp...)
+	// Append to FIFO and emit exact 960-sample frames
+	const frameBytes = 960 * 2 * 2 // 3840 bytes
+	s.fifo = append(s.fifo, interleaved...)
 	for len(s.fifo) >= frameBytes {
 		chunk := s.fifo[:frameBytes]
 		pts := s.outPTS48Next
