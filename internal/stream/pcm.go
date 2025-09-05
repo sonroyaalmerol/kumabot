@@ -46,12 +46,12 @@ type PCMStreamer struct {
 	outPTS48Next int64
 	gotFirstPTS  bool
 	firstPTS48   int64
+	inFmt        astiav.SampleFormat
 
 	fifo []byte
 
 	inputURL string
 	isHLS    bool
-	inFmt    *astiav.InputFormat
 }
 
 var debugOnce int32
@@ -220,7 +220,6 @@ func StartPCMStream(
 		fifo:          make([]byte, 0, 3840*8),
 		inputURL:      inputURL,
 		isHLS:         isHLS,
-		inFmt:         inFmt,
 	}
 
 	go ps.run(ctx2, seek, to)
@@ -450,7 +449,6 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	// Reset SWR init so it re-initializes on next frame
 	s.initedSWR = false
 	s.inRate = 0
-	s.inFmt = nil
 	s.inLayout = astiav.ChannelLayout{}
 	return nil
 }
