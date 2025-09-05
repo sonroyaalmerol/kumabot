@@ -552,6 +552,7 @@ func (s *PCMStreamer) flushSWR() error {
 		if outSamples <= 0 {
 			break
 		}
+
 		s.dstFrame.Unref()
 		s.dstFrame.SetNbSamples(outSamples)
 		s.dstFrame.SetChannelLayout(s.targetLayout)
@@ -563,12 +564,64 @@ func (s *PCMStreamer) flushSWR() error {
 		if err := s.swr.ConvertFrame(nil, s.dstFrame); err != nil {
 			return err
 		}
-		b, err := s.dstFrame.Data().Bytes(0)
+
+		// Interleave like convertAndWritePCM
+		nb := s.dstFrame.NbSamples()
+		if nb <= 0 {
+			continue
+		}
+		ch := s.targetLayout.Channels()
+
+		p0, err := s.dstFrame.Data().Bytes(0)
 		if err != nil {
 			return err
 		}
+
+		isPlanar := false
+		if ch > 1 {
+			if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
+				isPlanar = true
+			}
+		}
+
+		var interleaved []byte
+		if !isPlanar {
+			total := nb * ch * 2
+			if len(p0) < total {
+				return fmt.Errorf("packed dst too small: got %d, want %d", len(p0), total)
+			}
+			interleaved = make([]byte, total)
+			copy(interleaved, p0[:total])
+		} else {
+			planes := make([][]byte, ch)
+			planes[0] = p0
+			needPerPlane := nb * 2
+			for c := 1; c < ch; c++ {
+				pc, err := s.dstFrame.Data().Bytes(c)
+				if err != nil {
+					return err
+				}
+				planes[c] = pc
+			}
+			for c := 0; c < ch; c++ {
+				if len(planes[c]) < needPerPlane {
+					return fmt.Errorf("planar dst too small: ch%d=%d need=%d", c, len(planes[c]), needPerPlane)
+				}
+			}
+			total := nb * ch * 2
+			interleaved = make([]byte, total)
+			for i := 0; i < nb; i++ {
+				for c := 0; c < ch; c++ {
+					copy(
+						interleaved[(i*ch+c)*2:(i*ch+c)*2+2],
+						planes[c][i*2:i*2+2],
+					)
+				}
+			}
+		}
+
 		const frameBytes = 960 * 2 * 2
-		s.fifo = append(s.fifo, b...)
+		s.fifo = append(s.fifo, interleaved...)
 		for len(s.fifo) >= frameBytes {
 			chunk := s.fifo[:frameBytes]
 			pts := s.outPTS48Next
