@@ -408,35 +408,87 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	if outSamples <= 0 {
 		outSamples = 1
 	}
-	// Plausibility cap for safety
+	// Defensive cap to avoid pathological sizes
 	if outSamples > (inNb+2048)*3 {
 		outSamples = (inNb + 2048) * 3
 	}
 
+	// Configure dst frame
 	s.dstFrame.SetNbSamples(outSamples)
 	s.dstFrame.SetChannelLayout(s.targetLayout)
 	s.dstFrame.SetSampleRate(s.targetRate)
-	s.dstFrame.SetSampleFormat(s.targetFormat)
+	s.dstFrame.SetSampleFormat(s.targetFormat) // S16
+
 	if err := s.dstFrame.AllocBuffer(0); err != nil {
 		return fmt.Errorf("dst alloc buffer: %w", err)
 	}
 
+	// Convert
 	if err := s.swr.ConvertFrame(src, s.dstFrame); err != nil {
 		return fmt.Errorf("swr convert: %w", err)
 	}
 
-	b, err := s.dstFrame.Data().Bytes(0)
-	if err != nil {
-		return fmt.Errorf("dst bytes: %w", err)
-	}
-	expected := s.dstFrame.NbSamples() * s.targetNbChans * 2
-	if len(b) != expected {
-		return fmt.Errorf("unexpected dst size: got %d, want %d", len(b), expected)
+	nb := s.dstFrame.NbSamples()
+	ch := s.targetNbChans
+	if nb <= 0 || ch <= 0 {
+		return nil
 	}
 
-	// Append to sample FIFO and emit 960-sample frames
-	const frameBytes = 960 * 2 * 2
-	s.fifo = append(s.fifo, b...)
+	// Get plane 0
+	p0, err := s.dstFrame.Data().Bytes(0)
+	if err != nil {
+		return fmt.Errorf("dst plane0 bytes: %w", err)
+	}
+
+	// Detect planar: if plane 1 exists and has data, treat as planar
+	isPlanar := false
+	if ch > 1 {
+		if b1, err1 := s.dstFrame.Data().Bytes(1); err1 == nil && len(b1) > 0 {
+			isPlanar = true
+		}
+	}
+
+	var tmp []byte
+	if !isPlanar {
+		// Packed interleaved S16: expect nb * ch * 2 bytes on plane 0
+		total := nb * ch * 2
+		if len(p0) < total {
+			return fmt.Errorf("packed dst too small: got %d, want %d", len(p0), total)
+		}
+		tmp = make([]byte, total)
+		copy(tmp, p0[:total])
+	} else {
+		// Planar S16P: interleave from per-channel planes into LRLR...
+		planes := make([][]byte, ch)
+		planes[0] = p0
+		for c := 1; c < ch; c++ {
+			pc, err := s.dstFrame.Data().Bytes(c)
+			if err != nil {
+				return fmt.Errorf("dst plane%d bytes: %w", c, err)
+			}
+			planes[c] = pc
+		}
+		// Each plane must have at least nb * 2 bytes (S16)
+		for c := 0; c < ch; c++ {
+			need := nb * 2
+			if len(planes[c]) < need {
+				return fmt.Errorf("dst plane%d too small: got %d, want %d", c, len(planes[c]), need)
+			}
+		}
+		total := nb * ch * 2
+		tmp = make([]byte, total)
+		for sidx := 0; sidx < nb; sidx++ {
+			for c := 0; c < ch; c++ {
+				srcOff := sidx * 2
+				dstOff := (sidx*ch + c) * 2
+				copy(tmp[dstOff:dstOff+2], planes[c][srcOff:srcOff+2])
+			}
+		}
+	}
+
+	// Append to FIFO and emit 960-sample frames
+	const frameBytes = 960 * 2 * 2 // samples/ch * channels * bytes/sample
+	s.fifo = append(s.fifo, tmp...)
 	for len(s.fifo) >= frameBytes {
 		chunk := s.fifo[:frameBytes]
 		pts := s.outPTS48Next
