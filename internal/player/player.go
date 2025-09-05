@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -170,8 +171,9 @@ func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
 	pts48 := int64(binary.BigEndian.Uint64(hdr[0:8]))
 	nb := int32(binary.BigEndian.Uint32(hdr[8:12]))
 	n := int(binary.BigEndian.Uint32(hdr[12:16]))
-	if n <= 0 || nb <= 0 {
-		return framedPCM{}, io.ErrUnexpectedEOF
+	if nb != 960 || n != 960*2*2 {
+		// stream guarantees 960-sample frames; if not, treat as error
+		return framedPCM{}, fmt.Errorf("bad frame sizes nb=%d n=%d", nb, n)
 	}
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(r, buf); err != nil {
@@ -259,8 +261,8 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	// Opus packet ring
 	const ringCap = 32
 	type opusPkt struct {
-		b    []byte
-		n    int
+		b     []byte
+		n     int
 		pts48 int64 // media time corresponding to start of this packet
 	}
 	ring := make([]opusPkt, ringCap)
