@@ -144,13 +144,13 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 		return fmt.Errorf("frame set bytes: %w", err)
 	}
 	if debugOn() {
-		ms := pcmRMS16LE(pcm)
-		dprintf("frame PCM mean-square=%f", ms)
+		// ms := pcmRMS16LE(pcm)
+		// dprintf("frame PCM mean-square=%f", ms)
 	}
 	if err := e.cc.SendFrame(e.frame); err != nil {
 		return fmt.Errorf("send frame: %w", err)
 	}
-	dprintf("sent frame: bytes=%d", len(pcm))
+	// dprintf("sent frame: bytes=%d", len(pcm))
 
 	for {
 		e.packet.Unref()
@@ -160,7 +160,7 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 			}
 			return fmt.Errorf("receive packet: %w", err)
 		}
-		dprintf("got opus packet: size=%d", e.packet.Size())
+		// dprintf("got opus packet: size=%d", e.packet.Size())
 		if err := onPacket(e.packet.Data()); err != nil {
 			return err
 		}
