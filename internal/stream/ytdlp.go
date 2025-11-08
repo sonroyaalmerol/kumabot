@@ -177,13 +177,22 @@ func ytdlpDebugf(format string, args ...any) {
 }
 
 // YtdlpGetInfo runs yt-dlp -J -f bestaudio/best URL.
-func YtdlpGetInfo(ctx context.Context, url string) (*YTDLPInfo, error) {
+func YtdlpGetInfo(ctx context.Context, url string, poToken string) (*YTDLPInfo, error) {
 	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
 		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
 		DumpJSON()
+
+	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
+		extractorArgs := "youtube:player_client=default,mweb"
+		if poToken != "" {
+			extractorArgs += ";po_token=" + poToken
+		}
+		cmd = cmd.ExtractorArgs(extractorArgs)
+		ytdlpDebugf("using YouTube extractor args: player_client=default,mweb")
+	}
 
 	ytdlpDebugf("running yt-dlp for URL: %s", url)
 	res, err := cmd.Run(ctx, url)
