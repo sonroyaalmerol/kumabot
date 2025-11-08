@@ -6,7 +6,7 @@ require (
 	github.com/asticode/go-astiav v0.38.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/golang-migrate/migrate/v4 v4.19.0
-	github.com/lrstanley/go-ytdlp v1.2.3
+	github.com/lrstanley/go-ytdlp v1.2.7
 	github.com/zmb3/spotify/v2 v2.4.3
 	golang.org/x/oauth2 v0.30.0
 	modernc.org/sqlite v1.38.2

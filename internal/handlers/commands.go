@@ -441,11 +441,30 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	h.ongoingSearchQueue.Store(false)
 
 	if first {
+		errorMsg := "failed to find songs"
 		if lastErr != nil {
-			h.editReply(s, i, fmt.Sprintf("failed to find songs: %v", lastErr))
-		} else {
-			h.editReply(s, i, "no songs found for query: "+query)
+			errStr := lastErr.Error()
+			if strings.Contains(errStr, "ERROR:") {
+				lines := strings.Split(errStr, "\n")
+				for _, line := range lines {
+					if strings.HasPrefix(strings.TrimSpace(line), "ERROR:") {
+						errorMsg = strings.TrimSpace(line)
+						break
+					}
+				}
+			} else if len(errStr) > 200 {
+				errorMsg = "error: ..." + errStr[len(errStr)-200:]
+			} else {
+				errorMsg = fmt.Sprintf("error: %v", lastErr)
+			}
 		}
+
+		// Ensure message doesn't exceed Discord's limit
+		if len(errorMsg) > 1900 {
+			errorMsg = errorMsg[:1900] + "..."
+		}
+
+		h.editReply(s, i, errorMsg)
 		slog.Warn("no songs queued", "guildID", guildID, "query", query, "errCount", errCount, "lastErr", lastErr)
 		return
 	}

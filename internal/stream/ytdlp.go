@@ -192,12 +192,12 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 	}
 
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-		extractorArgs := "youtube:player-client=tv"
+		extractorArgs := "youtube:player-client=default,mweb"
 		if cfg.YouTubePOToken != "" {
 			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}
 		cmd = cmd.ExtractorArgs(extractorArgs)
-		ytdlpDebugf("using YouTube extractor args: player-client=tv")
+		ytdlpDebugf("using YouTube extractor args: player-client=default,mweb")
 	}
 
 	ytdlpDebugf("running yt-dlp for URL: %s", url)
