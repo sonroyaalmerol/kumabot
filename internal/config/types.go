@@ -12,6 +12,6 @@ type Config struct {
 	EnableSponsorBlock     bool
 	SponsorBlockTimeoutMin int
 	RegisterCommandsOnBot  bool
-	YouTubePOToken 		   string
-    YouTubeCookiesPath     string
+	YouTubePOToken         string
+	YouTubeCookiesPath     string
 }
