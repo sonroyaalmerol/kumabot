@@ -391,7 +391,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	first := true
 	var lastErr error
 	errCount := 0
-	
+
 	for ev := range streamCh {
 		if ev.Info != "" {
 			slog.Debug("resolve info", "guildID", guildID, "info", ev.Info)

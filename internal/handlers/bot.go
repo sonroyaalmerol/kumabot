@@ -51,7 +51,7 @@ func (b *Bot) Run(ctx context.Context) error {
 			successCount := 0
 			failCount := 0
 			var mu sync.Mutex
-			
+
 			for _, g := range s.State.Guilds {
 				wg.Add(1)
 				go func(guildID string) {
@@ -109,7 +109,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		if set == nil || !set.LeaveIfNoListeners {
 			return
 		}
-		chID := player.Conn.ChannelID
+		chID := player.ConnChannelID
 		size := getNonBotSize(s, gid, chID)
 		slog.Debug("voice state update", "guildID", gid, "channelID", chID, "nonBotCount", size)
 		if size == 0 {
