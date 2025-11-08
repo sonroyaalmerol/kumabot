@@ -350,6 +350,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 ) {
 	guildID := i.GuildID
 	memberID := i.Member.User.ID
+	textID := i.ChannelID
 
 	chID, ok := userInVoice(s, guildID, memberID)
 	if !ok {
@@ -378,7 +379,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		return
 	}
 
-	if err := player.Connect(s, guildID, chID); err != nil {
+	if err := player.Connect(s, guildID, chID, textID); err != nil {
 		slog.Warn("voice connect failed", "guildID", guildID, "channelID", chID, "err", err)
 		h.editReply(s, i, "couldn't connect to channel")
 		return

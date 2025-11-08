@@ -27,9 +27,12 @@ type Player struct {
 	cache   *cache.FileCache
 	guildID string
 
-	mu              sync.Mutex
-	Conn            *discordgo.VoiceConnection
-	ConnChannelID   string
+	mu            sync.Mutex
+	Conn          *discordgo.VoiceConnection
+	Session       *discordgo.Session
+	ConnChannelID string
+	TextChannelID string
+
 	Status          PlayerStatus
 	SongQueue       []SongMetadata
 	Qpos            int
@@ -71,7 +74,7 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 	}
 }
 
-func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error {
+func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID string) error {
 	p.mu.Lock()
 	// already on the same channel
 	if p.Conn != nil && p.ConnChannelID == channelID {
@@ -111,6 +114,8 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error 
 
 	p.mu.Lock()
 	p.Conn = vc
+	p.Session = s
+	p.TextChannelID = textChannelID
 	p.ConnChannelID = channelID
 	p.DefaultVol = defVol
 	// any pending idle disconnect for previous state should be canceled
@@ -326,6 +331,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	}
 	if cur == nil {
 		p.mu.Unlock()
+		p.scheduleIdleDisconnect()
 		return errors.New("queue empty")
 	}
 
@@ -438,15 +444,29 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 	// Start sender loop
 	go p.sendLoop(vc, i, cur, pos, sess)
-
-	embed := BuildPlayingEmbed(p)
-	if _, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-		Embeds: []*discordgo.MessageEmbed{embed},
-	}); err != nil {
-		slog.Warn("failed to send now-playing follow-up", "guildID", p.guildID, "err", err)
-	}
+	go p.sendNowPlayingEmbed()
 
 	return nil
+}
+
+func (p *Player) sendNowPlayingEmbed() {
+	p.mu.Lock()
+	s := p.Session
+	textChanID := p.TextChannelID
+	p.mu.Unlock()
+
+	if s == nil || textChanID == "" {
+		slog.Debug("cannot send embed: missing session or text channel",
+			"guildID", p.guildID)
+		return
+	}
+
+	embed := BuildPlayingEmbed(p)
+	if _, err := s.ChannelMessageSendEmbed(textChanID, embed); err != nil {
+		slog.Warn("failed to send now-playing embed",
+			"guildID", p.guildID,
+			"err", err)
+	}
 }
 
 func (p *Player) Pause() error {
@@ -487,6 +507,8 @@ func (p *Player) Stop() {
 	if p.Conn != nil {
 		_ = p.Conn.Speaking(false)
 	}
+
+	p.scheduleIdleDisconnect()
 }
 
 func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, n int) error {
@@ -1033,7 +1055,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := p.Play(ctx, nil, i); err != nil {
+	if err := p.Play(ctx, nil, nil); err != nil {
 		slog.Error("failed to play next song after playback end",
 			"guildID", p.guildID,
 			"error", err)
