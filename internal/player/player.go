@@ -60,7 +60,8 @@ type playSession struct {
 	enc *stream.Encoder
 	buf *opusBuffer
 
-	doneCh chan struct{}
+	doneCh     chan struct{}
+	producerWg sync.WaitGroup
 }
 
 func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, guildID string) *Player {
@@ -810,6 +811,8 @@ func (p *Player) sendLoop(
 	sess *playSession,
 ) {
 	defer func() {
+		sess.producerWg.Wait()
+
 		sess.buf.Close()
 		sess.enc.Close()
 		sess.pcm.Close()
@@ -834,6 +837,7 @@ func (p *Player) sendLoop(
 	defer vc.Speaking(false)
 
 	// Start producer goroutine
+	sess.producerWg.Add(1)
 	go p.producePackets(sess, startPos)
 
 	go func() {
@@ -860,6 +864,7 @@ func (p *Player) sendLoop(
 
 func (p *Player) producePackets(sess *playSession, startPos int) {
 	defer func() {
+		sess.producerWg.Done()
 		sess.buf.MarkEOS()
 		slog.Debug("producer finished, marked EOS",
 			"guildID", p.guildID,
