@@ -23,14 +23,27 @@ type ytdlpPlaylistJSON struct {
 	WebpageUrl string              `json:"webpage_url"`
 }
 
-func YtdlpPlaylist(ctx context.Context, url string) ([]*YTDLPInfo, error) {
+func YtdlpPlaylist(ctx context.Context, url string, poToken string) ([]*YTDLPInfo, error) {
 	cmd := ytdlp.New().
 		FlatPlaylist().
 		DumpJSON()
 
+	// Add YouTube-specific extractor args
+	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
+		extractorArgs := "youtube:player_client=default,mweb"
+		if poToken != "" {
+			extractorArgs += ";po_token=" + poToken
+		}
+		cmd = cmd.ExtractorArgs(extractorArgs)
+		ytdlpDebugf("playlist fetch with YouTube extractor args")
+	}
+
 	ytdlpDebugf("fetching playlist: %s", url)
 	res, err := cmd.Run(ctx, url)
 	if err != nil {
+		if strings.Contains(err.Error(), "Sign in to confirm") {
+			return nil, fmt.Errorf("yt-dlp playlist fetch failed (PO token may be required): %w", err)
+		}
 		return nil, fmt.Errorf("yt-dlp playlist fetch failed for %s: %w", url, err)
 	}
 

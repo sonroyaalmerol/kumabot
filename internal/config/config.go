@@ -43,6 +43,7 @@ func LoadConfig() (*Config, error) {
 			return i
 		}(),
 		RegisterCommandsOnBot: getenv("REGISTER_COMMANDS_ON_BOT", "false") == "true",
+		YouTubePOToken:        getenv("YOUTUBE_PO_TOKEN", ""),
 	}
 
 	if cfg.DiscordToken == "" {

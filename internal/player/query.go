@@ -100,7 +100,7 @@ func ResolveQueryStream(
 			// YouTube playlist
 			if strings.Contains(q, "youtube.com") || strings.Contains(q, "youtu.be") || strings.Contains(q, "music.youtube.") {
 				if strings.Contains(q, "list=") {
-					infos, err := stream.YtdlpPlaylist(ctx, q)
+					infos, err := stream.YtdlpPlaylist(ctx, q, cfg.YouTubePOToken)
 					if err != nil || len(infos) == 0 {
 						ch <- ResolveEvent{Err: fmt.Errorf("not found")}
 						return
