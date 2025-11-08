@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sonroyaalmerol/kumabot/internal/config"
 	ytdlp "github.com/lrstanley/go-ytdlp"
 )
 
