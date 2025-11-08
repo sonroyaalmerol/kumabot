@@ -844,18 +844,20 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 	var media0 int64
 	started := false
 
-	// Monitor for reconnections
 	reconnectCh := sess.pcm.ReconnectCh()
 
 	for {
 		select {
 		case <-sess.ctx.Done():
 			return
-		case <-reconnectCh:
-			// Reconnection detected - flush buffer to avoid stale data
-			slog.Info("PCM reconnection detected, flushing buffer", "guildID", p.guildID)
-			sess.buf.Flush()
-			// Reset timing anchors
+		case sig := <-reconnectCh:
+			// PCMStreamer reconnected - just log it
+			// DO NOT flush buffer - let it continue draining
+			slog.Info("PCMStreamer reconnected",
+				"guildID", p.guildID,
+				"resumeAtPTS", sig.LastSentPTS48)
+
+			// Reset timing for new frames
 			started = false
 			wall0 = time.Time{}
 			media0 = 0
@@ -872,6 +874,9 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 			started = true
 			wall0 = time.Now()
 			media0 = f.pts48
+			slog.Debug("producer (re)started",
+				"guildID", p.guildID,
+				"startPTS", f.pts48)
 		}
 
 		copy(framePCM, f.data)
@@ -890,16 +895,15 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
 		target := wall0.Add(offset)
 
-		// Push to buffer with backpressure handling
+		// Push to buffer
 		pushAttempts := 0
 		for {
 			if sess.buf.Push(outPkt, f.pts48, target) {
 				break
 			}
-			// Buffer full, wait a bit
 			pushAttempts++
-			if pushAttempts > 100 { // ~1 second total wait
-				slog.Warn("buffer full timeout, dropping packet", "guildID", p.guildID)
+			if pushAttempts > 100 {
+				slog.Warn("buffer full, dropping packet", "guildID", p.guildID)
 				break
 			}
 			select {
@@ -919,29 +923,13 @@ func (p *Player) consumePackets(
 ) {
 	const minBufferPackets = 20
 
-	reconnectCh := sess.pcm.ReconnectCh()
-
-	waitForBuffer := func() bool {
-		deadline := time.Now().Add(5 * time.Second)
-		for sess.buf.BufferedCount() < minBufferPackets {
-			if time.Now().After(deadline) {
-				slog.Warn("buffer fill timeout", "guildID", p.guildID)
-				return false
-			}
-			select {
-			case <-sess.ctx.Done():
-				return false
-			case <-reconnectCh:
-				deadline = time.Now().Add(5 * time.Second)
-				slog.Info("reconnection during buffer fill", "guildID", p.guildID)
-			case <-time.After(50 * time.Millisecond):
-			}
+	// Initial buffer wait
+	for sess.buf.BufferedCount() < minBufferPackets {
+		select {
+		case <-sess.ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
 		}
-		return true
-	}
-
-	if !waitForBuffer() {
-		return
 	}
 
 	updatePosition := func(pts48 int64) {
@@ -955,22 +943,8 @@ func (p *Player) consumePackets(
 
 	firstPacket := true
 	droppedCount := 0
-	const maxDroppedBeforeRebuffer = 5
 
 	for {
-		select {
-		case sig := <-reconnectCh:
-			slog.Info("reconnection in consumer, rebuffering",
-				"guildID", p.guildID,
-				"targetPTS", sig.LastSentPTS48)
-			if !waitForBuffer() {
-				return
-			}
-			droppedCount = 0
-			continue
-		default:
-		}
-
 		pkt, ok := sess.buf.Pop(sess.ctx)
 		if !ok {
 			break
@@ -1000,17 +974,7 @@ func (p *Player) consumePackets(
 			droppedCount++
 			slog.Debug("dropped packet",
 				"guildID", p.guildID,
-				"consecutive", droppedCount,
-				"pts", pkt.pts48)
-
-			if droppedCount >= maxDroppedBeforeRebuffer {
-				slog.Warn("too many drops, rebuffering", "guildID", p.guildID)
-				sess.buf.Flush()
-				if !waitForBuffer() {
-					return
-				}
-				droppedCount = 0
-			}
+				"consecutive", droppedCount)
 		}
 
 		buffered := sess.buf.BufferedCount()
