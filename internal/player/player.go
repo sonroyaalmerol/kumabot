@@ -28,6 +28,7 @@ type Player struct {
 
 	mu              sync.Mutex
 	Conn            *discordgo.VoiceConnection
+	ConnChannelID   string
 	Status          PlayerStatus
 	SongQueue       []SongMetadata
 	Qpos            int
@@ -68,21 +69,22 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error {
 	p.mu.Lock()
 	// already on the same channel
-	if p.Conn != nil && p.Conn.ChannelID == channelID {
+	if p.Conn != nil && p.ConnChannelID == channelID {
 		p.mu.Unlock()
 		return nil
 	}
 	// disconnect old connection (no network work under lock)
 	old := p.Conn
 	p.Conn = nil
+	p.ConnChannelID = ""
 	p.mu.Unlock()
 
 	if old != nil {
 		_ = old.Speaking(false)
-		old.Disconnect()
+		_ = old.Disconnect(context.Background())
 	}
 
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
+	vc, err := s.ChannelVoiceJoin(context.Background(), guildID, channelID, false, true)
 	if err != nil {
 		return err
 	}
@@ -96,6 +98,7 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error 
 
 	p.mu.Lock()
 	p.Conn = vc
+	p.ConnChannelID = channelID
 	p.DefaultVol = defVol
 	// any pending idle disconnect for previous state should be canceled
 	p.cancelIdleDisconnectLocked()
@@ -120,11 +123,12 @@ func (p *Player) Disconnect() {
 
 	vc := p.Conn
 	p.Conn = nil
+	p.ConnChannelID = ""
 	p.mu.Unlock()
 
 	if vc != nil {
 		_ = vc.Speaking(false)
-		vc.Disconnect()
+		_ = vc.Disconnect(context.Background())
 	}
 }
 
@@ -639,8 +643,9 @@ func (p *Player) scheduleIdleDisconnect() {
 		defer p.mu.Unlock()
 		if p.Status == StatusIdle && p.curPlay == nil && p.Conn != nil {
 			_ = p.Conn.Speaking(false)
-			p.Conn.Disconnect()
+			_ = p.Conn.Disconnect(context.Background())
 			p.Conn = nil
+			p.ConnChannelID = ""
 		}
 	})
 }
@@ -650,6 +655,14 @@ func (p *Player) cancelIdleDisconnectLocked() {
 		p.DisconnectTimer.Stop()
 		p.DisconnectTimer = nil
 	}
+}
+
+func isVoiceReady(vc *discordgo.VoiceConnection) bool {
+	if vc == nil {
+		return false
+	}
+	// Check if OpusSend channel is available (indicates connection is ready)
+	return vc.OpusSend != nil
 }
 
 func (p *Player) sendLoop(
@@ -667,14 +680,14 @@ func (p *Player) sendLoop(
 
 	// Wait voice connection ready
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && (vc == nil || !vc.Ready) {
+	for time.Now().Before(deadline) && !isVoiceReady(vc) {
 		select {
 		case <-sess.ctx.Done():
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	if vc == nil || !vc.Ready {
+	if !isVoiceReady(vc) {
 		return
 	}
 
