@@ -75,6 +75,28 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 	}
 }
 
+func (p *Player) setIdleState() {
+	p.mu.Lock()
+	p.Status = StatusIdle
+	p.NowPlaying = nil
+	p.PositionSec = 0
+	queueEmpty := len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
+	p.mu.Unlock()
+
+	if queueEmpty {
+		slog.Info("player idle with empty queue - scheduling disconnect",
+			"guildID", p.guildID)
+		p.scheduleIdleDisconnect()
+	}
+}
+
+func (p *Player) setIdleStateLocked() bool {
+	p.Status = StatusIdle
+	p.NowPlaying = nil
+	p.PositionSec = 0
+	return len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
+}
+
 func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID string) error {
 	p.mu.Lock()
 	// already on the same channel
@@ -486,8 +508,6 @@ func (p *Player) Pause() error {
 
 func (p *Player) Stop() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.stopPlayLocked()
 
 	p.Status = StatusIdle
@@ -508,7 +528,9 @@ func (p *Player) Stop() {
 	if p.Conn != nil {
 		_ = p.Conn.Speaking(false)
 	}
+	p.mu.Unlock()
 
+	slog.Info("player stopped - scheduling disconnect", "guildID", p.guildID)
 	p.scheduleIdleDisconnect()
 }
 
@@ -516,10 +538,9 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 	p.mu.Lock()
 	p.stopPlayLocked()
 
-	if p.Qpos+n-1 >= len(p.SongQueue) {
-		// queue empty; stay idle and schedule disconnect
-		p.Status = StatusIdle
-		p.PositionSec = 0
+	if p.Qpos+n >= len(p.SongQueue) {
+		// Queue empty after skip
+		shouldSchedule := p.setIdleStateLocked()
 
 		p.lastResolvedURL = ""
 		p.lastVideoID = ""
@@ -527,7 +548,11 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 
 		p.mu.Unlock()
 
-		p.scheduleIdleDisconnect()
+		if shouldSchedule {
+			slog.Info("forward skipped past queue end - scheduling disconnect",
+				"guildID", p.guildID)
+			p.scheduleIdleDisconnect()
+		}
 		return nil
 	}
 
@@ -755,6 +780,8 @@ func (p *Player) scheduleIdleDisconnect() {
 	// Load setting outside lock (can block)
 	set, _ := p.repo.GetSettings(context.Background(), p.guildID)
 	if set == nil || set.SecondsWaitAfterEmpty == 0 {
+		slog.Debug("idle disconnect not configured or disabled",
+			"guildID", p.guildID)
 		return
 	}
 	wait := time.Duration(set.SecondsWaitAfterEmpty) * time.Second
@@ -765,6 +792,11 @@ func (p *Player) scheduleIdleDisconnect() {
 	if p.DisconnectTimer != nil {
 		p.DisconnectTimer.Stop()
 	}
+
+	slog.Info("scheduling idle disconnect",
+		"guildID", p.guildID,
+		"waitSeconds", wait.Seconds())
+
 	p.DisconnectTimer = time.AfterFunc(wait, func() {
 		p.mu.Lock()
 		vc := p.Conn
@@ -776,7 +808,15 @@ func (p *Player) scheduleIdleDisconnect() {
 		p.mu.Unlock()
 
 		if shouldDisconnect {
+			slog.Info("executing idle disconnect",
+				"guildID", p.guildID)
 			_ = p.safeDisconnect(vc)
+		} else {
+			slog.Debug("idle disconnect skipped - conditions not met",
+				"guildID", p.guildID,
+				"status", p.Status,
+				"curPlay", p.curPlay != nil,
+				"vc", vc != nil)
 		}
 	})
 }
@@ -1041,21 +1081,20 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 		hasNext = p.Qpos < len(p.SongQueue)
 	}
 
-	if hasNext {
-		p.Status = StatusIdle
-	} else {
-		p.Status = StatusIdle
-		p.NowPlaying = nil
-	}
-
-	p.mu.Unlock()
-
 	if !hasNext {
-		slog.Info("playback ended, no next song - scheduling disconnect",
-			"guildID", p.guildID)
-		p.scheduleIdleDisconnect()
+		shouldSchedule := p.setIdleStateLocked()
+		p.mu.Unlock()
+
+		if shouldSchedule {
+			slog.Info("playback ended, no next song - scheduling disconnect",
+				"guildID", p.guildID)
+			p.scheduleIdleDisconnect()
+		}
 		return
 	}
+
+	p.Status = StatusIdle // Ready to play next
+	p.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1065,11 +1104,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 			"guildID", p.guildID,
 			"error", err)
 
-		p.mu.Lock()
-		p.Status = StatusIdle
-		p.NowPlaying = nil
-		p.mu.Unlock()
-
-		p.scheduleIdleDisconnect()
+		// Failed to play next, set idle and schedule disconnect
+		p.setIdleState()
 	}
 }
