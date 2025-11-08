@@ -914,6 +914,8 @@ func (p *Player) consumePackets(
 	startPos int,
 	i *discordgo.InteractionCreate,
 ) {
+	defer p.handlePlaybackEnd(sess, i)
+
 	const minBufferPackets = 20
 
 	// Initial buffer wait
@@ -975,8 +977,6 @@ func (p *Player) consumePackets(
 			slog.Debug("buffer running low", "count", buffered, "guildID", p.guildID)
 		}
 	}
-
-	p.handlePlaybackEnd(sess, i)
 }
 
 func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCreate) {
