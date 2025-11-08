@@ -433,6 +433,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 					}(),
 				)
 				h.editReply(s, i, msg)
+				h.cmdNowPlaying(s, i)
 			}
 			slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 		}
