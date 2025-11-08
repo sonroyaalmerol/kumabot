@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -134,9 +135,42 @@ func (p *Player) Disconnect() {
 	p.mu.Unlock()
 
 	if vc != nil {
-		_ = vc.Speaking(false)
-		_ = vc.Disconnect(context.Background())
+		safeVoiceDisconnect(vc)
 	}
+}
+
+func safeVoiceDisconnect(vc *discordgo.VoiceConnection) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Voice disconnect panic recovered", "panic", r)
+		}
+	}()
+
+	if vc == nil {
+		return
+	}
+
+	_ = safeSpeaking(vc, false)
+
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = vc.Disconnect(ctx)
+}
+
+func safeSpeaking(vc *discordgo.VoiceConnection, speaking bool) error {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Speaking panic recovered", "speaking", speaking, "panic", r)
+		}
+	}()
+
+	if vc == nil {
+		return fmt.Errorf("voice connection is nil")
+	}
+
+	return vc.Speaking(speaking)
 }
 
 func (p *Player) Add(song SongMetadata, immediate bool) {
