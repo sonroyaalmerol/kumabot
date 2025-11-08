@@ -837,6 +837,13 @@ func (p *Player) sendLoop(
 }
 
 func (p *Player) producePackets(sess *playSession, startPos int) {
+	defer func() {
+		sess.buf.MarkEOS()
+		slog.Debug("producer finished, marked EOS",
+			"guildID", p.guildID,
+			"buffered", sess.buf.BufferedCount())
+	}()
+
 	r := bufio.NewReaderSize(sess.pcm.Stdout(), 128*1024)
 	framePCM := make([]byte, sess.enc.FrameBytes())
 
@@ -987,43 +994,55 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	}
 
 	p.curPlay = nil
-	p.Status = StatusIdle
 	p.PositionSec = 0
 
-	shouldReplay := false
+	var hasNext bool
 
 	if p.LoopSong {
 		seek0 := 0
 		p.requestedSeek = &seek0
-		shouldReplay = true
-	} else if p.LoopQueue && len(p.SongQueue) > 0 && p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
-		// Move current song to end of queue
-		item := p.SongQueue[p.Qpos]
-		p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
-		p.SongQueue = append(p.SongQueue, item)
-		// Don't increment Qpos - we stay at same position, which now has the next song
+		hasNext = true
+	} else if p.LoopQueue && len(p.SongQueue) > 1 {
+		if p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
+			item := p.SongQueue[p.Qpos]
+			p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
+			p.SongQueue = append(p.SongQueue, item)
+		}
+		hasNext = p.Qpos >= 0 && p.Qpos < len(p.SongQueue)
 	} else {
-		// Normal advance
 		p.Qpos++
+		hasNext = p.Qpos < len(p.SongQueue)
 	}
 
-	hasNext := (p.Qpos >= 0 && p.Qpos < len(p.SongQueue)) || shouldReplay
+	if hasNext {
+		p.Status = StatusIdle
+	} else {
+		p.Status = StatusIdle
+		p.NowPlaying = nil
+	}
+
 	p.mu.Unlock()
 
 	if !hasNext {
-		// No next song and not replaying - schedule idle disconnect
 		slog.Info("playback ended, no next song - scheduling disconnect",
 			"guildID", p.guildID)
 		p.scheduleIdleDisconnect()
 		return
 	}
 
-	// Play next song or replay current
-	if err := p.Play(context.Background(), nil, i); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := p.Play(ctx, nil, i); err != nil {
 		slog.Error("failed to play next song after playback end",
 			"guildID", p.guildID,
 			"error", err)
-		// If play fails, schedule disconnect
+
+		p.mu.Lock()
+		p.Status = StatusIdle
+		p.NowPlaying = nil
+		p.mu.Unlock()
+
 		p.scheduleIdleDisconnect()
 	}
 }

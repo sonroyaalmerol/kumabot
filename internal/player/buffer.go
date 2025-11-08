@@ -13,6 +13,7 @@ type opusBuffer struct {
 	readPos  int
 	writePos int
 	closed   bool
+	eos      bool
 	notEmpty *sync.Cond
 }
 
@@ -35,14 +36,13 @@ func (ob *opusBuffer) Push(data []byte, pts48 int64, targetTS time.Time) bool {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	if ob.closed {
+	if ob.closed || ob.eos {
 		return false
 	}
 
 	// Calculate buffer usage
 	used := (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
 	if used >= ob.maxSize-1 {
-		// Buffer full, drop oldest or wait
 		return false
 	}
 
@@ -72,22 +72,28 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 			return pkt, true
 		}
 
+		// No packets available
+		if ob.eos {
+			// End of stream reached and buffer is empty
+			return bufferedPacket{}, false
+		}
+
 		// Wait for data
 		ob.notEmpty.Wait()
 	}
-}
-
-func (ob *opusBuffer) IsFull() bool {
-	ob.mu.Lock()
-	defer ob.mu.Unlock()
-	used := (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
-	return used >= ob.maxSize-1
 }
 
 func (ob *opusBuffer) BufferedCount() int {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	return (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
+}
+
+func (ob *opusBuffer) MarkEOS() {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	ob.eos = true
+	ob.notEmpty.Broadcast()
 }
 
 func (ob *opusBuffer) Close() {
