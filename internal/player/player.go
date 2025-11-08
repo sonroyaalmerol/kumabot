@@ -40,7 +40,10 @@ type Player struct {
 	DisconnectTimer *time.Timer
 	LastURL         string
 
-	requestedSeek *int
+	requestedSeek   *int
+	lastResolvedURL string
+	lastVideoID     string
+	urlResolvedAt   time.Time
 
 	curPlay *playSession
 }
@@ -116,6 +119,10 @@ func (p *Player) Disconnect() {
 	p.NowPlaying = nil
 	p.PositionSec = 0
 
+	p.lastResolvedURL = ""
+	p.lastVideoID = ""
+	p.urlResolvedAt = time.Time{}
+
 	if p.DisconnectTimer != nil {
 		p.DisconnectTimer.Stop()
 		p.DisconnectTimer = nil
@@ -165,6 +172,10 @@ func (p *Player) Clear() {
 	}
 	p.SongQueue = newq
 	p.Qpos = 0
+
+	p.lastResolvedURL = ""
+	p.lastVideoID = ""
+	p.urlResolvedAt = time.Time{}
 }
 
 func (p *Player) currentLocked() *SongMetadata {
@@ -307,15 +318,33 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		inputURL = cur.URL
 		if !strings.HasPrefix(inputURL, "http") {
 			ytURL := "https://www.youtube.com/watch?v=" + cur.VideoID
-			info, err := stream.YtdlpGetInfo(ctx, p.cfg, ytURL)
-			if err != nil {
-				return err
+
+			p.mu.Lock()
+			canReuse := p.lastResolvedURL != "" &&
+				p.lastVideoID == cur.VideoID &&
+				time.Since(p.urlResolvedAt) < 5*time.Hour
+			if canReuse {
+				inputURL = p.lastResolvedURL
 			}
-			mu := stream.PickMediaURL(info)
-			if mu.URL == "" {
-				return errors.New("no usable media URL")
+			p.mu.Unlock()
+
+			if !canReuse {
+				info, err := stream.YtdlpGetInfo(ctx, p.cfg, ytURL)
+				if err != nil {
+					return err
+				}
+				mu := stream.PickMediaURL(info)
+				if mu.URL == "" {
+					return errors.New("no usable media URL")
+				}
+				inputURL = mu.URL
+
+				p.mu.Lock()
+				p.lastResolvedURL = inputURL
+				p.lastVideoID = cur.VideoID
+				p.urlResolvedAt = time.Now()
+				p.mu.Unlock()
 			}
-			inputURL = mu.URL
 		}
 	}
 
@@ -390,6 +419,10 @@ func (p *Player) Stop() {
 	p.NowPlaying = nil
 	p.PositionSec = 0
 
+	p.lastResolvedURL = ""
+	p.lastVideoID = ""
+	p.urlResolvedAt = time.Time{}
+
 	if p.DisconnectTimer != nil {
 		p.DisconnectTimer.Stop()
 		p.DisconnectTimer = nil
@@ -408,6 +441,11 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error
 		// queue empty; stay idle and schedule disconnect
 		p.Status = StatusIdle
 		p.PositionSec = 0
+
+		p.lastResolvedURL = ""
+		p.lastVideoID = ""
+		p.urlResolvedAt = time.Time{}
+
 		p.mu.Unlock()
 
 		p.scheduleIdleDisconnect()
@@ -416,6 +454,11 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error
 
 	p.Qpos += n
 	p.PositionSec = 0
+
+	p.lastResolvedURL = ""
+	p.lastVideoID = ""
+	p.urlResolvedAt = time.Time{}
+
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
@@ -432,6 +475,11 @@ func (p *Player) Back(ctx context.Context, s *discordgo.Session) error {
 	}
 	p.Qpos--
 	p.PositionSec = 0
+
+	p.lastResolvedURL = ""
+	p.lastVideoID = ""
+	p.urlResolvedAt = time.Time{}
+
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
