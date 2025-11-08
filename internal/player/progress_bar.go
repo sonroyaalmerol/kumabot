@@ -1,4 +1,4 @@
-package ui
+package player
 
 func ProgressBar(width int, progress float64) string {
 	if width <= 0 {

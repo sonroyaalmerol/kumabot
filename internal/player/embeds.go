@@ -1,16 +1,15 @@
-package ui
+package player
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/sonroyaalmerol/kumabot/internal/player"
 	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
 
-func songLink(s player.SongMetadata) string {
-	if s.Source == player.SourceHLS {
+func songLink(s SongMetadata) string {
+	if s.Source == SourceHLS {
 		return fmt.Sprintf("[%s](%s)", s.Title, s.URL)
 	}
 	yid := s.VideoID
@@ -25,7 +24,7 @@ func songLink(s player.SongMetadata) string {
 	return fmt.Sprintf("[%s](%s)", s.Title, link)
 }
 
-func BuildPlayingEmbed(p *player.Player) *discordgo.MessageEmbed {
+func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 	cur := p.GetCurrent()
 	if cur == nil {
 		return &discordgo.MessageEmbed{
@@ -36,7 +35,7 @@ func BuildPlayingEmbed(p *player.Player) *discordgo.MessageEmbed {
 	}
 	pos := p.GetPosition()
 	button := "▶️"
-	if p.Status == player.StatusPlaying {
+	if p.Status == StatusPlaying {
 		button = "⏹️"
 	}
 	progress := 0.0
@@ -63,7 +62,7 @@ func BuildPlayingEmbed(p *player.Player) *discordgo.MessageEmbed {
 
 	color := 0x006400
 	title := "Now Playing"
-	if p.Status != player.StatusPlaying {
+	if p.Status != StatusPlaying {
 		color = 0x8B0000
 		title = "Paused"
 	}
@@ -83,7 +82,7 @@ func BuildPlayingEmbed(p *player.Player) *discordgo.MessageEmbed {
 }
 
 func BuildQueueEmbed(
-	p *player.Player,
+	p *Player,
 	page int,
 	pageSize int,
 	ongoingQueue bool,
@@ -237,7 +236,7 @@ func BuildQueueEmbed(
 	return embed, nil
 }
 
-func queueInfo(p *player.Player) string {
+func queueInfo(p *Player) string {
 	n := p.QueueSize()
 	if n == 0 {
 		return "-"

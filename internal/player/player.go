@@ -279,14 +279,14 @@ func (p *Player) QueueSize() int {
 	return len(p.SongQueue) - p.Qpos - 1
 }
 
-func (p *Player) MaybeAutoplayAfterAdd(ctx context.Context, s *discordgo.Session) {
+func (p *Player) MaybeAutoplayAfterAdd(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p.mu.Lock()
 	shouldPlay := p.Status != StatusPlaying && p.currentLocked() != nil
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
 	if shouldPlay {
-		go func() { _ = p.Play(ctx, s) }()
+		go func() { _ = p.Play(ctx, s, i) }()
 	}
 }
 
@@ -314,7 +314,7 @@ func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
 	return framedPCM{pts48: pts48, nbSamples: nb, data: buf}, nil
 }
 
-func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
+func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	// Read minimal state and stop any current play under lock
 	p.mu.Lock()
 	vc := p.Conn
@@ -433,7 +433,14 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 	p.mu.Unlock()
 
 	// Start sender loop
-	go p.sendLoop(vc, cur, pos, sess)
+	go p.sendLoop(vc, i, cur, pos, sess)
+
+	embed := BuildPlayingEmbed(p)
+	if _, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Embeds: []*discordgo.MessageEmbed{embed},
+	}); err != nil {
+		slog.Warn("failed to send now-playing follow-up", "guildID", p.guildID, "err", err)
+	}
 
 	return nil
 }
@@ -478,7 +485,7 @@ func (p *Player) Stop() {
 	}
 }
 
-func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error {
+func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, n int) error {
 	p.mu.Lock()
 	p.stopPlayLocked()
 
@@ -507,10 +514,10 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, n int) error
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
-	return p.Play(ctx, s)
+	return p.Play(ctx, s, i)
 }
 
-func (p *Player) Back(ctx context.Context, s *discordgo.Session) error {
+func (p *Player) Back(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p.mu.Lock()
 	p.stopPlayLocked()
 
@@ -528,10 +535,10 @@ func (p *Player) Back(ctx context.Context, s *discordgo.Session) error {
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
-	return p.Play(ctx, s)
+	return p.Play(ctx, s, i)
 }
 
-func (p *Player) Seek(ctx context.Context, s *discordgo.Session, posSec int) error {
+func (p *Player) Seek(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, posSec int) error {
 	p.mu.Lock()
 	cur := p.currentLocked()
 	if cur == nil {
@@ -553,7 +560,7 @@ func (p *Player) Seek(ctx context.Context, s *discordgo.Session, posSec int) err
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
-	return p.Play(ctx, s)
+	return p.Play(ctx, s, i)
 }
 
 func (p *Player) GetPosition() int {
@@ -658,7 +665,7 @@ func (p *Player) RemoveFromQueue(pos int, count int) error {
 	return nil
 }
 
-func (p *Player) Replay(ctx context.Context, s *discordgo.Session) error {
+func (p *Player) Replay(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p.mu.Lock()
 	cur := p.currentLocked()
 	p.mu.Unlock()
@@ -668,14 +675,14 @@ func (p *Player) Replay(ctx context.Context, s *discordgo.Session) error {
 	if cur.IsLive {
 		return errors.New("can't replay a livestream")
 	}
-	return p.Seek(ctx, s, 0)
+	return p.Seek(ctx, s, i, 0)
 }
 
-func (p *Player) Next(ctx context.Context, s *discordgo.Session) error {
-	return p.Forward(ctx, s, 1)
+func (p *Player) Next(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	return p.Forward(ctx, s, i, 1)
 }
 
-func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
+func (p *Player) Resume(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p.mu.Lock()
 	if p.Status == StatusPlaying {
 		p.mu.Unlock()
@@ -692,7 +699,7 @@ func (p *Player) Resume(ctx context.Context, s *discordgo.Session) error {
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
-	return p.Play(ctx, s)
+	return p.Play(ctx, s, i)
 }
 
 // stopPlayLocked stops the current play session. Caller must hold p.mu.
@@ -771,6 +778,7 @@ func isVoiceReady(vc *discordgo.VoiceConnection) bool {
 
 func (p *Player) sendLoop(
 	vc *discordgo.VoiceConnection,
+	i *discordgo.InteractionCreate,
 	cur *SongMetadata,
 	startPos int,
 	sess *playSession,
@@ -904,5 +912,5 @@ func (p *Player) sendLoop(
 	}
 
 	// Start next or replay
-	_ = p.Play(context.Background(), nil)
+	_ = p.Play(context.Background(), nil, i)
 }

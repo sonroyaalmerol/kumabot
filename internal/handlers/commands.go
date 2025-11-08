@@ -15,7 +15,6 @@ import (
 	plib "github.com/sonroyaalmerol/kumabot/internal/player"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
 	"github.com/sonroyaalmerol/kumabot/internal/spotify"
-	"github.com/sonroyaalmerol/kumabot/internal/ui"
 	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
 
@@ -410,7 +409,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 			player.Add(ev.Song, false)
 			if first {
 				first = false
-				player.MaybeAutoplayAfterAdd(ctx, s)
+				player.MaybeAutoplayAfterAdd(ctx, s, i)
 				msg := fmt.Sprintf("%s added to the%s queue%s%s",
 					utils.EscapeMd(ev.Song.Title),
 					func() string {
@@ -465,17 +464,6 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		}
 
 		h.editReply(s, i, errorMsg)
-
-		// Send now-playing as a follow-up message
-		cur := player.GetCurrent()
-		if cur != nil {
-			embed := ui.BuildPlayingEmbed(player)
-			if _, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
-				Embeds: []*discordgo.MessageEmbed{embed},
-			}); err != nil {
-				slog.Warn("failed to send now-playing follow-up", "guildID", guildID, "err", err)
-			}
-		}
 
 		slog.Warn("no songs queued", "guildID", guildID, "query", query, "errCount", errCount, "lastErr", lastErr)
 		return
@@ -563,7 +551,7 @@ func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	slog.Debug("cmd now-playing", "guildID", i.GuildID, "userID", userIDOf(i), "title", cur.Title)
-	embed := ui.BuildPlayingEmbed(player)
+	embed := plib.BuildPlayingEmbed(player)
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -611,7 +599,7 @@ func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.Interaction
 		slog.Debug("fseek command failed: beyond song length", "guildID", i.GuildID, "userID", userIDOf(i), "requested", newPos, "length", cur.Length)
 		return
 	}
-	if err := player.Seek(context.Background(), s, newPos); err != nil {
+	if err := player.Seek(context.Background(), s, i, newPos); err != nil {
 		slog.Warn("fseek failed", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec, "err", err)
 		h.reply(s, i, fmt.Sprintf("seek failed: %v", err), true)
 		return
@@ -879,7 +867,7 @@ func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionC
 		slog.Error("next command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if err := player.Next(context.Background(), s); err != nil {
+	if err := player.Next(context.Background(), s, i); err != nil {
 		slog.Warn("next failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.reply(s, i, fmt.Sprintf("failed to skip: %v", err), true)
 		return
@@ -938,7 +926,7 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 
-	embed, err := ui.BuildQueueEmbed(player, page, pageSize, h.ongoingSearchQueue.Load())
+	embed, err := plib.BuildQueueEmbed(player, page, pageSize, h.ongoingSearchQueue.Load())
 	if err != nil {
 		slog.Debug("build queue embed failed", "guildID", i.GuildID, "page", page, "pageSize", pageSize, "err", err)
 		h.reply(s, i, err.Error(), true)
@@ -993,7 +981,7 @@ func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.Interactio
 		slog.Error("replay command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if err := player.Replay(context.Background(), s); err != nil {
+	if err := player.Replay(context.Background(), s, i); err != nil {
 		slog.Warn("replay failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.reply(s, i, fmt.Sprintf("replay failed: %v", err), true)
 		return
@@ -1019,7 +1007,7 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 		slog.Debug("resume command failed: no current song", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if err := player.Resume(context.Background(), s); err != nil {
+	if err := player.Resume(context.Background(), s, i); err != nil {
 		slog.Warn("resume failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.reply(s, i, fmt.Sprintf("resume failed: %v", err), true)
 		return
@@ -1035,7 +1023,7 @@ func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.Interactio
 		slog.Error("unskip command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if err := player.Back(context.Background(), s); err != nil {
+	if err := player.Back(context.Background(), s, i); err != nil {
 		slog.Warn("unskip/back failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.reply(s, i, fmt.Sprintf("can't go back: %v", err), true)
 		return
