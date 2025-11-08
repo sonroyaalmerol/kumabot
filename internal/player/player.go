@@ -851,16 +851,9 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		case <-sess.ctx.Done():
 			return
 		case sig := <-reconnectCh:
-			// PCMStreamer reconnected - just log it
-			// DO NOT flush buffer - let it continue draining
 			slog.Info("PCMStreamer reconnected",
 				"guildID", p.guildID,
 				"resumeAtPTS", sig.LastSentPTS48)
-
-			// Reset timing for new frames
-			started = false
-			wall0 = time.Time{}
-			media0 = 0
 			continue
 		default:
 		}
@@ -874,7 +867,7 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 			started = true
 			wall0 = time.Now()
 			media0 = f.pts48
-			slog.Debug("producer (re)started",
+			slog.Debug("producer started",
 				"guildID", p.guildID,
 				"startPTS", f.pts48)
 		}
@@ -997,26 +990,40 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	p.Status = StatusIdle
 	p.PositionSec = 0
 
-	advance := true
+	shouldReplay := false
+
 	if p.LoopSong {
 		seek0 := 0
 		p.requestedSeek = &seek0
-		advance = false
+		shouldReplay = true
 	} else if p.LoopQueue && len(p.SongQueue) > 0 && p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
+		// Move current song to end of queue
 		item := p.SongQueue[p.Qpos]
 		p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
 		p.SongQueue = append(p.SongQueue, item)
+		// Don't increment Qpos - we stay at same position, which now has the next song
 	} else {
+		// Normal advance
 		p.Qpos++
 	}
 
-	hasNext := p.Qpos >= 0 && p.Qpos < len(p.SongQueue)
+	hasNext := (p.Qpos >= 0 && p.Qpos < len(p.SongQueue)) || shouldReplay
 	p.mu.Unlock()
 
-	if advance && !hasNext {
+	if !hasNext {
+		// No next song and not replaying - schedule idle disconnect
+		slog.Info("playback ended, no next song - scheduling disconnect",
+			"guildID", p.guildID)
 		p.scheduleIdleDisconnect()
 		return
 	}
 
-	_ = p.Play(context.Background(), nil, i)
+	// Play next song or replay current
+	if err := p.Play(context.Background(), nil, i); err != nil {
+		slog.Error("failed to play next song after playback end",
+			"guildID", p.guildID,
+			"error", err)
+		// If play fails, schedule disconnect
+		p.scheduleIdleDisconnect()
+	}
 }

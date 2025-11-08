@@ -56,7 +56,7 @@ type PCMStreamer struct {
 	reconnectCh chan ReconnectSignal
 
 	// crossfade state
-	resumeAt48 int64 // if >=0, trim decoded audio until this sample index (48k)
+	resumeAt48        int64 // if >=0, trim decoded audio until this sample index (48k)
 	lastProducedPTS48 int64
 	producedMu        sync.Mutex
 }
@@ -461,8 +461,8 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.decCtx = decCtx
 	s.timeBase = st.TimeBase()
 
-	// Seek with safety margin
-	const safetyMarginSamples = 2880 // ~60ms at 48kHz
+	// Seek with larger safety margin to ensure we get audio before target
+	const safetyMarginSamples = 9600 // ~200ms at 48kHz - larger margin for network jitter
 	safeSeekTarget := targetPTS - safetyMarginSamples
 	if safeSeekTarget < 0 {
 		safeSeekTarget = 0
@@ -483,10 +483,10 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.inRate = 0
 	s.inLayout = astiav.ChannelLayout{}
 
-	// Set exact resume point
+	// Set exact resume point - this ensures we trim to exactly where we left off
 	s.resumeAt48 = targetPTS
 
-	// Signal reconnection
+	// Signal reconnection - DON'T send the PTS, let consumer continue naturally
 	select {
 	case s.reconnectCh <- ReconnectSignal{LastSentPTS48: targetPTS}:
 	default:
