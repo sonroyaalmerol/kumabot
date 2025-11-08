@@ -59,6 +59,14 @@ type PCMStreamer struct {
 
 	resumeAt48 int64 // if >=0, trim decoded audio until this sample index (48k)
 	cfWindow   int   // samples per channel for crossfade, default 960 (20ms)
+
+	mu                 sync.Mutex
+	lastDeliveredPTS48 int64
+	reconnectCh        chan ReconnectSignal
+}
+
+type ReconnectSignal struct {
+	LastSentPTS48 int64
 }
 
 var debugOnce int32
@@ -96,29 +104,6 @@ func StartPCMStream(
 
 	dict := astiav.NewDictionary()
 	defer dict.Free()
-
-	//hdrs := map[string]string{
-	//	"User-Agent":      utils.RandomUserAgent(),
-	//	"Referer":         "https://www.youtube.com/",
-	//	"Accept":          "*/*",
-	//	"Accept-Language": "en-US,en;q=0.9",
-	//	"Origin":          "https://www.youtube.com",
-	//	"Connection":      "keep-alive",
-	//}
-
-	//headersBlob := utils.BuildFFmpegHeaders(hdrs)
-	//if headersBlob != "" {
-	//	_ = dict.Set("headers", headersBlob, 0)
-	//}
-
-	//_ = dict.Set("user_agent", hdrs["User-Agent"], 0)
-	//_ = dict.Set("referer", hdrs["Referer"], 0)
-	//_ = dict.Set("reconnect", "1", 0)
-	//_ = dict.Set("reconnect_streamed", "1", 0)
-	//_ = dict.Set("reconnect_delay_max", "5", 0)
-	//_ = dict.Set("rw_timeout", "15000000", 0)
-	//_ = dict.Set("http_persistent", "1", 0)
-	//_ = dict.Set("http_multiple", "0", 0)
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
@@ -228,11 +213,22 @@ func StartPCMStream(
 		inputURL:      inputURL,
 		isHLS:         isHLS,
 		resumeAt48:    -1,
-		cfWindow:      960, // 20 ms
+		cfWindow:      960,
+		reconnectCh:   make(chan ReconnectSignal, 1),
 	}
 
 	go ps.run(ctx2, seek, to)
 	return ps, nil
+}
+
+func (s *PCMStreamer) ReconnectCh() <-chan ReconnectSignal {
+	return s.reconnectCh
+}
+
+func (s *PCMStreamer) SetLastDeliveredPTS(pts48 int64) {
+	s.mu.Lock()
+	s.lastDeliveredPTS48 = pts48
+	s.mu.Unlock()
 }
 
 func (s *PCMStreamer) Stdout() io.Reader { return s.pr }
@@ -393,19 +389,35 @@ func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 
 // reopenAndSeek attempts to reopen the input and seek near the last emitted PTS
 func (s *PCMStreamer) reopenAndSeek() error {
+	// Capture last delivered PTS before closing
+	s.mu.Lock()
+	targetPTS := s.lastDeliveredPTS48
+	if targetPTS <= 0 {
+		targetPTS = s.outPTS48Next
+	}
+	s.mu.Unlock()
+
+	// Save last frame for crossfade if available
+	const frameBytes = 960 * 2 * 2
+	if len(s.fifo) >= frameBytes {
+		s.cfTail = make([]byte, frameBytes)
+		copy(s.cfTail, s.fifo[len(s.fifo)-frameBytes:])
+		pcmDebugf("saved crossfade tail: %d bytes", len(s.cfTail))
+	}
+
 	// Close existing contexts
 	if s.fc != nil {
 		s.fc.CloseInput()
 		s.fc.Free()
 		s.fc = nil
 	}
+
 	// Alloc fresh format context
 	fc := astiav.AllocFormatContext()
 	if fc == nil {
 		return errors.New("alloc format context (reopen)")
 	}
 	dict := astiav.NewDictionary()
-	// Keep HLS options if needed
 	var inFmt *astiav.InputFormat
 	if s.isHLS {
 		inFmt = astiav.FindInputFormat("hls")
@@ -426,7 +438,7 @@ func (s *PCMStreamer) reopenAndSeek() error {
 		fc.Free()
 		return fmt.Errorf("find stream info (reopen): %w", err)
 	}
-	// Find same audio stream index (best audio)
+
 	st, codec, err := fc.FindBestStream(astiav.MediaTypeAudio, -1, -1)
 	if err != nil || st == nil || codec == nil {
 		fc.CloseInput()
@@ -436,7 +448,7 @@ func (s *PCMStreamer) reopenAndSeek() error {
 		}
 		return errors.New("no audio stream found (reopen)")
 	}
-	// Recreate decoder
+
 	if s.decCtx != nil {
 		s.decCtx.Free()
 	}
@@ -459,29 +471,45 @@ func (s *PCMStreamer) reopenAndSeek() error {
 		fc.Free()
 		return fmt.Errorf("open decoder (reopen): %w", err)
 	}
-	// Swap contexts
+
 	s.fc = fc
 	s.audioStream = st
 	s.decCtx = decCtx
 	s.timeBase = st.TimeBase()
-	// Seek near last output PTS (48k clock)
-	if s.outPTS48Next > 0 {
-		ts := astiav.RescaleQ(s.outPTS48Next, astiav.NewRational(1, 48000), s.timeBase)
-		_ = s.fc.SeekFrame(s.audioStream.Index(), ts, astiav.NewSeekFlags())
-		_ = s.fc.Flush()
+
+	// Seek with safety margin: go back 60ms (2880 samples) to ensure we catch a keyframe
+	const safetyMarginSamples = 2880 // ~60ms at 48kHz
+	safeSeekTarget := targetPTS - safetyMarginSamples
+	if safeSeekTarget < 0 {
+		safeSeekTarget = 0
 	}
-	// Clear FIFO to re-align to next 960 boundary
+
+	ts := astiav.RescaleQ(safeSeekTarget, astiav.NewRational(1, 48000), s.timeBase)
+	if err := s.fc.SeekFrame(s.audioStream.Index(), ts, astiav.NewSeekFlags(astiav.SeekFlagBackward)); err != nil {
+		pcmDebugf("seek failed: %v (continuing anyway)", err)
+	}
+	_ = s.fc.Flush()
+
+	pcmDebugf("reopenAndSeek: target=%d safeSeek=%d (-%d samples)",
+		targetPTS, safeSeekTarget, safetyMarginSamples)
+
+	// Clear FIFO and reset SWR
 	s.fifo = s.fifo[:0]
-	// Reset SWR init so it re-initializes on next frame
 	s.initedSWR = false
 	s.inRate = 0
 	s.inLayout = astiav.ChannelLayout{}
 
-	// Arrange sample-accurate trim and crossfade
-	s.resumeAt48 = s.outPTS48Next
-	// capture tail for crossfade (last 20ms if available)
-	s.cfTail = nil
+	// Set exact resume point
+	s.resumeAt48 = targetPTS
 	s.resumedCFD = true
+
+	// Signal reconnection with target PTS
+	select {
+	case s.reconnectCh <- ReconnectSignal{LastSentPTS48: targetPTS}:
+	default:
+	}
+
+	pcmDebugf("reconnection prepared: will resume at PTS48=%d", targetPTS)
 	return nil
 }
 
@@ -678,49 +706,66 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	s.fifo = append(s.fifo, interleaved...)
 	for len(s.fifo) >= frameBytes {
 		pts := s.outPTS48Next
-		// Trim logic on resume: ensure we start exactly at resumeAt48
 		if s.resumeAt48 >= 0 {
-			// If this frame ends before resume target, drop it
-			if pts+960 <= s.resumeAt48 {
+			frameStart := pts
+			frameEnd := pts + 960
+
+			pcmDebugf("trim check: frame=[%d..%d) resume=%d", frameStart, frameEnd, s.resumeAt48)
+
+			// Case 1: This entire frame is before resume point - skip it
+			if frameEnd <= s.resumeAt48 {
+				pcmDebugf("  -> skipping frame (before resume point)")
 				s.outPTS48Next += 960
 				s.fifo = s.fifo[frameBytes:]
 				continue
 			}
-			// If target lies inside this frame, slice from exact offset
-			if pts < s.resumeAt48 && s.resumeAt48 < pts+960 {
-				// offset in samples/ch
-				offSamp := int(s.resumeAt48 - pts) // 0..959
-				// slice bytes from interleaved stereo 16-bit: 2ch * 2B * offSamp
-				byteOff := offSamp * 4
-				// Take tail [offSamp..960), then we will pad next frame logic to align to 960 boundary:
-				partial := make([]byte, frameBytes-byteOff)
-				copy(partial, s.fifo[byteOff:frameBytes])
-				// We still emit a full 960-sample frame to downstream; rebuild a full frame by
-				// concatenating with upcoming samples (simple approach: emit shorter first frame this
-				// time and align on next iterations). To keep downstream contract (always 960),
-				// push the partial into fifo front to combine with next decoded PCM:
+
+			// Case 2: Resume point is inside this frame - trim and align
+			if frameStart < s.resumeAt48 && s.resumeAt48 < frameEnd {
+				offsetSamples := int(s.resumeAt48 - frameStart) // 0..959
+				offsetBytes := offsetSamples * 4                // stereo s16le: 2 channels * 2 bytes
+
+				pcmDebugf("  -> trimming %d samples (%d bytes) from frame start", offsetSamples, offsetBytes)
+
+				// Extract the portion we need [offsetSamples..960)
+				partialLen := frameBytes - offsetBytes
+				partial := make([]byte, partialLen)
+				copy(partial, s.fifo[offsetBytes:frameBytes])
+
+				// Remove this frame from fifo
 				s.fifo = s.fifo[frameBytes:]
-				// Prepend partial back to fifo head so next append will grow it to >=3840 again
+
+				// Prepend partial back to front of fifo
+				// Next iteration will build a full 960-sample frame
 				s.fifo = append(partial, s.fifo...)
-				// Align outPTS to resumeAt48
+
+				// Update PTS to exact resume point
 				s.outPTS48Next = s.resumeAt48
-				// Clear resume guard so subsequent frames flow normally
 				s.resumeAt48 = -1
+
+				pcmDebugf("  -> resume aligned at PTS48=%d (%d bytes remaining in fifo)", s.outPTS48Next, len(s.fifo))
 				continue
 			}
-			// pts >= resumeAt48: resume alignment complete
+
+			// Case 3: Frame starts at or after resume point - we're aligned
+			pcmDebugf("  -> frame aligned, resuming normal playback")
 			s.resumeAt48 = -1
 		}
+
 		// Normal emission
 		chunk := make([]byte, frameBytes)
 		copy(chunk, s.fifo[:frameBytes])
 		s.fifo = s.fifo[frameBytes:]
+
+		// Apply crossfade on first frame after resume
 		if s.resumedCFD && s.cfTail != nil && len(s.cfTail) == frameBytes {
+			pcmDebugf("applying crossfade: window=%d samples", s.cfWindow)
 			s.applyCrossfadeInPlace(chunk, s.cfTail, s.cfWindow)
 			s.cfTail = nil
 			s.resumedCFD = false
 		}
-		// Emit framed PCM immediately (Player handles timing)
+
+		// Emit framed PCM
 		if err := writePCMFrame(s.pw, PCMFrame{
 			Data:      chunk,
 			PTS48:     pts,
@@ -759,7 +804,6 @@ func (s *PCMStreamer) flushSWR() error {
 			return err
 		}
 
-		// Interleave like convertAndWritePCM using declared format
 		nb := s.dstFrame.NbSamples()
 		if nb <= 0 {
 			continue
@@ -804,35 +848,46 @@ func (s *PCMStreamer) flushSWR() error {
 
 		const frameBytes = 960 * 2 * 2
 		s.fifo = append(s.fifo, interleaved...)
+
 		for len(s.fifo) >= frameBytes {
 			pts := s.outPTS48Next
+
 			if s.resumeAt48 >= 0 {
-				if pts+960 <= s.resumeAt48 {
+				frameStart := pts
+				frameEnd := pts + 960
+
+				if frameEnd <= s.resumeAt48 {
 					s.outPTS48Next += 960
 					s.fifo = s.fifo[frameBytes:]
 					continue
 				}
-				if pts < s.resumeAt48 && s.resumeAt48 < pts+960 {
-					offSamp := int(s.resumeAt48 - pts)
-					byteOff := offSamp * 4
-					partial := make([]byte, frameBytes-byteOff)
-					copy(partial, s.fifo[byteOff:frameBytes])
+
+				if frameStart < s.resumeAt48 && s.resumeAt48 < frameEnd {
+					offsetSamples := int(s.resumeAt48 - frameStart)
+					offsetBytes := offsetSamples * 4
+					partialLen := frameBytes - offsetBytes
+					partial := make([]byte, partialLen)
+					copy(partial, s.fifo[offsetBytes:frameBytes])
 					s.fifo = s.fifo[frameBytes:]
 					s.fifo = append(partial, s.fifo...)
 					s.outPTS48Next = s.resumeAt48
 					s.resumeAt48 = -1
 					continue
 				}
+
 				s.resumeAt48 = -1
 			}
+
 			chunk := make([]byte, frameBytes)
 			copy(chunk, s.fifo[:frameBytes])
 			s.fifo = s.fifo[frameBytes:]
+
 			if s.resumedCFD && s.cfTail != nil && len(s.cfTail) == frameBytes {
 				s.applyCrossfadeInPlace(chunk, s.cfTail, s.cfWindow)
 				s.cfTail = nil
 				s.resumedCFD = false
 			}
+
 			if err := writePCMFrame(s.pw, PCMFrame{
 				Data:      chunk,
 				PTS48:     pts,

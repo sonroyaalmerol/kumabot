@@ -77,6 +77,22 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 	}
 }
 
+func (ob *opusBuffer) Flush() {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+
+	// Reset pointers to clear buffer
+	ob.readPos = 0
+	ob.writePos = 0
+}
+
+func (ob *opusBuffer) IsFull() bool {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	used := (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
+	return used >= ob.maxSize-1
+}
+
 func (ob *opusBuffer) BufferedCount() int {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()

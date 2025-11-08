@@ -47,6 +47,9 @@ type Player struct {
 	urlResolvedAt   time.Time
 
 	curPlay *playSession
+
+	lastSentPTS48 int64
+	lastSentMu    sync.Mutex
 }
 
 type playSession struct {
@@ -814,6 +817,24 @@ func (p *Player) sendLoop(
 	// Start producer goroutine
 	go p.producePackets(sess, startPos)
 
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-sess.ctx.Done():
+				return
+			case <-ticker.C:
+				count := sess.buf.BufferedCount()
+				slog.Debug("buffer health",
+					"buffered", count,
+					"max", sess.buf.maxSize,
+					"guildID", p.guildID)
+			}
+		}
+	}()
+
 	// Consumer: send buffered packets
 	p.consumePackets(vc, sess, startPos, i)
 }
@@ -826,10 +847,25 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 	var media0 int64
 	started := false
 
+	reconnectCh := sess.pcm.ReconnectCh()
+
 	for {
 		select {
 		case <-sess.ctx.Done():
 			return
+		case sig := <-reconnectCh:
+			slog.Info("PCM reconnection detected",
+				"guildID", p.guildID,
+				"lastSentPTS", sig.LastSentPTS48)
+
+			// Flush buffer to clear stale data
+			sess.buf.Flush()
+
+			// Reset timing anchors
+			started = false
+			wall0 = time.Time{}
+			media0 = 0
+			continue
 		default:
 		}
 
@@ -842,6 +878,9 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 			started = true
 			wall0 = time.Now()
 			media0 = f.pts48
+			slog.Debug("producer started",
+				"guildID", p.guildID,
+				"startPTS", f.pts48)
 		}
 
 		copy(framePCM, f.data)
@@ -860,12 +899,17 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
 		target := wall0.Add(offset)
 
-		// Push to buffer (non-blocking)
+		// Push to buffer with backpressure
+		pushAttempts := 0
 		for {
 			if sess.buf.Push(outPkt, f.pts48, target) {
 				break
 			}
-			// Buffer full, wait a bit
+			pushAttempts++
+			if pushAttempts > 100 {
+				slog.Warn("buffer full timeout, dropping packet", "guildID", p.guildID)
+				break
+			}
 			select {
 			case <-sess.ctx.Done():
 				return
@@ -881,16 +925,31 @@ func (p *Player) consumePackets(
 	startPos int,
 	i *discordgo.InteractionCreate,
 ) {
-	// Minimum buffer threshold before starting playback
-	const minBufferPackets = 20 // ~400ms
+	const minBufferPackets = 20
 
-	// Wait for initial buffer
-	for sess.buf.BufferedCount() < minBufferPackets {
-		select {
-		case <-sess.ctx.Done():
-			return
-		case <-time.After(50 * time.Millisecond):
+	reconnectCh := sess.pcm.ReconnectCh()
+
+	waitForBuffer := func() bool {
+		deadline := time.Now().Add(5 * time.Second)
+		for sess.buf.BufferedCount() < minBufferPackets {
+			if time.Now().After(deadline) {
+				slog.Warn("buffer fill timeout", "guildID", p.guildID)
+				return false
+			}
+			select {
+			case <-sess.ctx.Done():
+				return false
+			case <-reconnectCh:
+				deadline = time.Now().Add(5 * time.Second)
+				slog.Info("reconnection during buffer fill", "guildID", p.guildID)
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
+		return true
+	}
+
+	if !waitForBuffer() {
+		return
 	}
 
 	updatePosition := func(pts48 int64) {
@@ -903,8 +962,23 @@ func (p *Player) consumePackets(
 	}
 
 	firstPacket := true
+	droppedCount := 0
+	const maxDroppedBeforeRebuffer = 5
 
 	for {
+		select {
+		case sig := <-reconnectCh:
+			slog.Info("reconnection in consumer, rebuffering",
+				"guildID", p.guildID,
+				"targetPTS", sig.LastSentPTS48)
+			if !waitForBuffer() {
+				return
+			}
+			droppedCount = 0
+			continue
+		default:
+		}
+
 		pkt, ok := sess.buf.Pop(sess.ctx)
 		if !ok {
 			break
@@ -913,9 +987,9 @@ func (p *Player) consumePackets(
 		if firstPacket {
 			firstPacket = false
 			updatePosition(pkt.pts48)
+			slog.Info("playback started", "guildID", p.guildID, "startPTS", pkt.pts48)
 		}
 
-		// Pace playback based on target timestamp
 		if d := time.Until(pkt.targetTS); d > 0 {
 			select {
 			case <-sess.ctx.Done():
@@ -924,26 +998,43 @@ func (p *Player) consumePackets(
 			}
 		}
 
-		// Send with timeout
 		select {
 		case <-sess.ctx.Done():
 			return
 		case vc.OpusSend <- pkt.data:
+			// Track last successfully sent PTS
+			p.lastSentMu.Lock()
+			p.lastSentPTS48 = pkt.pts48
+			p.lastSentMu.Unlock()
+
+			// Pass to PCMStreamer for reconnection reference
+			sess.pcm.SetLastDeliveredPTS(pkt.pts48)
+
 			updatePosition(pkt.pts48)
+			droppedCount = 0
 		case <-time.After(200 * time.Millisecond):
-			// Packet dropped due to network congestion
-			slog.Debug("dropped packet due to send timeout", "guildID", p.guildID)
+			droppedCount++
+			slog.Debug("dropped packet",
+				"guildID", p.guildID,
+				"consecutive", droppedCount,
+				"pts", pkt.pts48)
+
+			if droppedCount >= maxDroppedBeforeRebuffer {
+				slog.Warn("too many drops, rebuffering", "guildID", p.guildID)
+				sess.buf.Flush()
+				if !waitForBuffer() {
+					return
+				}
+				droppedCount = 0
+			}
 		}
 
-		// Check buffer health
 		buffered := sess.buf.BufferedCount()
-		if buffered < 5 {
-			// Buffer running low, but keep going
+		if buffered < 5 && buffered > 0 {
 			slog.Debug("buffer running low", "count", buffered, "guildID", p.guildID)
 		}
 	}
 
-	// Playback finished - handle next song logic
 	p.handlePlaybackEnd(sess, i)
 }
 
