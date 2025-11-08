@@ -433,9 +433,8 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 					}(),
 				)
 				h.editReply(s, i, msg)
-				h.cmdNowPlaying(s, i)
+				slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 			}
-			slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
 		}
 	}
 
@@ -466,10 +465,21 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		}
 
 		h.editReply(s, i, errorMsg)
+
+		// Send now-playing as a follow-up message
+		cur := player.GetCurrent()
+		if cur != nil {
+			embed := ui.BuildPlayingEmbed(player)
+			if _, err := s.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{embed},
+			}); err != nil {
+				slog.Warn("failed to send now-playing follow-up", "guildID", guildID, "err", err)
+			}
+		}
+
 		slog.Warn("no songs queued", "guildID", guildID, "query", query, "errCount", errCount, "lastErr", lastErr)
 		return
 	}
-
 	if shuffleAdd {
 		//TODO: shuffle
 	}

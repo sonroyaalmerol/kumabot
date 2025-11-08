@@ -93,6 +93,14 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error 
 		return err
 	}
 
+	// This prevents the panic in Kill() when channels are closed
+	if vc.OpusSend == nil {
+		vc.OpusSend = make(chan []byte, 2)
+	}
+	if vc.OpusRecv == nil {
+		vc.OpusRecv = make(chan *discordgo.Packet, 2)
+	}
+
 	// Load settings for default volume outside lock
 	ctx := context.Background()
 	defVol := DefaultVolume
@@ -109,6 +117,43 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID string) error 
 	p.mu.Unlock()
 
 	return nil
+}
+
+// safeDisconnect safely disconnects a voice connection with proper cleanup
+func (p *Player) safeDisconnect(vc *discordgo.VoiceConnection) error {
+	if vc == nil {
+		return nil
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Voice disconnect panic recovered",
+				"panic", r,
+				"guildID", p.guildID,
+			)
+		}
+	}()
+
+	// Ensure channels exist before disconnecting
+	// This prevents panic in Kill() when it tries to close nil channels
+	if vc.OpusSend == nil {
+		vc.OpusSend = make(chan []byte, 2)
+	}
+	if vc.OpusRecv == nil {
+		vc.OpusRecv = make(chan *discordgo.Packet, 2)
+	}
+
+	// Stop speaking first
+	_ = vc.Speaking(false)
+
+	// Small delay to let pending operations complete
+	time.Sleep(150 * time.Millisecond)
+
+	// Disconnect with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	return vc.Disconnect(ctx)
 }
 
 func (p *Player) Disconnect() {
@@ -135,42 +180,8 @@ func (p *Player) Disconnect() {
 	p.mu.Unlock()
 
 	if vc != nil {
-		safeVoiceDisconnect(vc)
+		_ = p.safeDisconnect(vc)
 	}
-}
-
-func safeVoiceDisconnect(vc *discordgo.VoiceConnection) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("Voice disconnect panic recovered", "panic", r)
-		}
-	}()
-
-	if vc == nil {
-		return
-	}
-
-	_ = safeSpeaking(vc, false)
-
-	time.Sleep(100 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = vc.Disconnect(ctx)
-}
-
-func safeSpeaking(vc *discordgo.VoiceConnection, speaking bool) error {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("Speaking panic recovered", "speaking", speaking, "panic", r)
-		}
-	}()
-
-	if vc == nil {
-		return fmt.Errorf("voice connection is nil")
-	}
-
-	return vc.Speaking(speaking)
 }
 
 func (p *Player) Add(song SongMetadata, immediate bool) {
@@ -722,12 +733,16 @@ func (p *Player) scheduleIdleDisconnect() {
 	}
 	p.DisconnectTimer = time.AfterFunc(wait, func() {
 		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.Status == StatusIdle && p.curPlay == nil && p.Conn != nil {
-			_ = p.Conn.Speaking(false)
-			_ = p.Conn.Disconnect(context.Background())
+		vc := p.Conn
+		shouldDisconnect := p.Status == StatusIdle && p.curPlay == nil && vc != nil
+		if shouldDisconnect {
 			p.Conn = nil
 			p.ConnChannelID = ""
+		}
+		p.mu.Unlock()
+
+		if shouldDisconnect {
+			_ = p.safeDisconnect(vc)
 		}
 	})
 }
@@ -743,7 +758,14 @@ func isVoiceReady(vc *discordgo.VoiceConnection) bool {
 	if vc == nil {
 		return false
 	}
-	// Check if OpusSend channel is available (indicates connection is ready)
+	// Ensure channels are initialized
+	if vc.OpusSend == nil {
+		vc.OpusSend = make(chan []byte, 2)
+	}
+	if vc.OpusRecv == nil {
+		vc.OpusRecv = make(chan *discordgo.Packet, 2)
+	}
+	// Check if connection is ready
 	return vc.OpusSend != nil
 }
 
