@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sonroyaalmerol/kumabot/internal/config"
 	ytdlp "github.com/lrstanley/go-ytdlp"
+	"github.com/sonroyaalmerol/kumabot/internal/config"
 )
 
 type ytdlpPlaylistItem struct {
@@ -37,7 +37,7 @@ func YtdlpPlaylist(ctx context.Context, cfg *config.Config, url string) ([]*YTDL
 
 	// Add YouTube-specific extractor args
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-		extractorArgs := "youtube:player_client=default,mweb"
+		extractorArgs := "youtube:player-client=default,mweb"
 		if cfg.YouTubePOToken != "" {
 			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}
@@ -64,7 +64,7 @@ func YtdlpPlaylist(ctx context.Context, cfg *config.Config, url string) ([]*YTDL
 
 	pl := infosParsed[0]
 	ytdlpDebugf("playlist parsed: %d entries", len(pl.Entries))
-	
+
 	out := make([]*YTDLPInfo, 0, len(pl.Entries))
 	for i, e := range pl.Entries {
 		if e == nil {
