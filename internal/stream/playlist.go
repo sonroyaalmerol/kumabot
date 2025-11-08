@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"fmt"
 
 	ytdlp "github.com/lrstanley/go-ytdlp"
 )
