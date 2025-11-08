@@ -465,8 +465,8 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.decCtx = decCtx
 	s.timeBase = st.TimeBase()
 
-	// Seek with larger safety margin to ensure we get audio before target
-	const safetyMarginSamples = 9600 // ~200ms at 48kHz - larger margin for network jitter
+	// Seek with safety margin
+	const safetyMarginSamples = 2880
 	safeSeekTarget := targetPTS - safetyMarginSamples
 	if safeSeekTarget < 0 {
 		safeSeekTarget = 0
@@ -487,14 +487,22 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.inRate = 0
 	s.inLayout = astiav.ChannelLayout{}
 
-	// DON'T reset totalSamplesProduced or streamStartPTS48!
-	// We continue counting from where we left off
+	// CRITICAL: Adjust totalSamplesProduced to match where we're seeking
+	// We're seeking to safeSeekTarget, so when decoder starts producing frames,
+	// they'll be at approximately safeSeekTarget in the original timeline
+	s.totalSamplesProduced = safeSeekTarget - s.streamStartPTS48
+	if s.totalSamplesProduced < 0 {
+		s.totalSamplesProduced = 0
+	}
+
+	pcmDebugf("reset totalSamplesProduced to %d (seekTarget=%d - streamStart=%d)",
+		s.totalSamplesProduced, safeSeekTarget, s.streamStartPTS48)
 
 	// Set exact resume point
 	s.resumeAt48 = targetPTS
 
-	// Reset stream start flag so it recalculates relative to new stream position
-	s.streamStartDetermined = false
+	// DON'T reset streamStartDetermined - keep the original timeline anchor
+	// streamStartDetermined stays true
 
 	// Signal reconnection
 	select {
@@ -701,24 +709,22 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	for len(s.fifo) >= frameBytes {
 		// Determine stream start PTS on first frame emission
 		if !s.streamStartDetermined {
-			// Use source frame PTS, accounting for any decoder processing
+			// Use source frame PTS
 			srcPTS := src.Pts()
 			if srcPTS == astiav.NoPtsValue {
 				srcPTS = 0
 			}
 			s.streamStartPTS48 = astiav.RescaleQ(srcPTS, s.timeBase, astiav.NewRational(1, 48000))
-
-			// Add samples from this converted frame that came before current fifo position
-			// (accounts for any decoder skip/trim)
-			nbConverted := int64(len(interleaved) / 4) // bytes to samples
-			s.streamStartPTS48 += (nbConverted - int64(len(s.fifo)/4))
-
 			s.streamStartDetermined = true
+			s.totalSamplesProduced = 0
 			pcmDebugf("stream start determined: startPTS=%d", s.streamStartPTS48)
 		}
 
 		// Calculate PTS from samples produced
 		pts := s.streamStartPTS48 + s.totalSamplesProduced
+
+		pcmDebugf("frame PTS: streamStart=%d + produced=%d = %d",
+			s.streamStartPTS48, s.totalSamplesProduced, pts)
 
 		// Sample-accurate trim logic on resume
 		if s.resumeAt48 >= 0 {
@@ -749,11 +755,12 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 				s.fifo = s.fifo[frameBytes:]
 				s.fifo = append(partial, s.fifo...)
 
-				// Adjust sample counter
+				// Adjust sample counter to resume point
 				s.totalSamplesProduced = s.resumeAt48 - s.streamStartPTS48
 				s.resumeAt48 = -1
 
-				pcmDebugf("  -> resume aligned at PTS48=%d", s.streamStartPTS48+s.totalSamplesProduced)
+				pcmDebugf("  -> resume aligned at PTS48=%d (produced=%d)",
+					s.streamStartPTS48+s.totalSamplesProduced, s.totalSamplesProduced)
 				continue
 			}
 
