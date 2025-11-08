@@ -100,7 +100,7 @@ func ResolveQueryStream(
 			// YouTube playlist
 			if strings.Contains(q, "youtube.com") || strings.Contains(q, "youtu.be") || strings.Contains(q, "music.youtube.") {
 				if strings.Contains(q, "list=") {
-					infos, err := stream.YtdlpPlaylist(ctx, q, cfg.YouTubePOToken)
+					infos, err := stream.YtdlpPlaylist(ctx, cfg, q)
 					if err != nil || len(infos) == 0 {
 						ch <- ResolveEvent{Err: fmt.Errorf("not found")}
 						return
@@ -118,7 +118,7 @@ func ResolveQueryStream(
 						default:
 						}
 						// fetch full info to get streamable URL and description
-						info, err := stream.YtdlpGetInfo(ctx, "https://www.youtube.com/watch?v="+e.Id, cfg.YouTubePOToken)
+						info, err := stream.YtdlpGetInfo(ctx, cfg, "https://www.youtube.com/watch?v="+e.Id)
 						if err != nil || info == nil {
 							ch <- ResolveEvent{Err: fmt.Errorf("failed to get info for %s", e.Id)}
 							continue
@@ -133,7 +133,7 @@ func ResolveQueryStream(
 				}
 
 				// single YouTube item
-				info, err := stream.YtdlpGetInfo(ctx, q, cfg.YouTubePOToken)
+				info, err := stream.YtdlpGetInfo(ctx, cfg, q)
 				if err != nil {
 					ch <- ResolveEvent{Err: err}
 					return
@@ -162,7 +162,7 @@ func ResolveQueryStream(
 		}
 
 		// Not a URL => YouTube search
-		info, err := stream.YtdlpGetInfo(ctx, "ytsearch1:"+q, cfg.YouTubePOToken)
+		info, err := stream.YtdlpGetInfo(ctx, cfg, "ytsearch1:"+q)
 		if err != nil {
 			ch <- ResolveEvent{Err: err}
 			return
@@ -202,7 +202,7 @@ func streamSpotifyTracks(
 		default:
 		}
 		q := fmt.Sprintf(`ytsearch1:"%s" "%s"`, t.Name, t.Artist)
-		info, err := stream.YtdlpGetInfo(ctx, q, cfg.YouTubePOToken)
+		info, err := stream.YtdlpGetInfo(ctx, cfg, q)
 		if err != nil || info == nil {
 			ch <- ResolveEvent{Err: fmt.Errorf("not found: %s - %s", t.Artist, t.Name)}
 			continue
@@ -269,7 +269,7 @@ func spotifyTracksToYouTube(
 
 	for _, t := range tracks {
 		q := fmt.Sprintf(`ytsearch1:"%s" "%s"`, t.Name, t.Artist)
-		info, err := stream.YtdlpGetInfo(ctx, q, cfg.YouTubePOToken)
+		info, err := stream.YtdlpGetInfo(ctx, cfg, q)
 		if err != nil || info == nil {
 			notFound++
 			continue

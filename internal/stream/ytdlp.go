@@ -177,7 +177,7 @@ func ytdlpDebugf(format string, args ...any) {
 }
 
 // YtdlpGetInfo runs yt-dlp -J -f bestaudio/best URL.
-func YtdlpGetInfo(ctx context.Context, url string, poToken string) (*YTDLPInfo, error) {
+func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPInfo, error) {
 	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
 
 	cmd := ytdlp.New().
@@ -185,10 +185,15 @@ func YtdlpGetInfo(ctx context.Context, url string, poToken string) (*YTDLPInfo, 
 		NoCheckCertificates().
 		DumpJSON()
 
+	if cfg.YouTubeCookiesPath != "" {
+		cmd = cmd.Cookies(cfg.YouTubeCookiesPath)
+		ytdlpDebugf("using cookies from file: %s", cfg.YouTubeCookiesPath)
+	}
+
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
 		extractorArgs := "youtube:player_client=default,mweb"
-		if poToken != "" {
-			extractorArgs += ";po_token=" + poToken
+		if cfg.YouTubePOToken != "" {
+			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}
 		cmd = cmd.ExtractorArgs(extractorArgs)
 		ytdlpDebugf("using YouTube extractor args: player_client=default,mweb")

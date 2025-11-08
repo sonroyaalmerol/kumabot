@@ -303,7 +303,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session) error {
 		inputURL = cur.URL
 		if !strings.HasPrefix(inputURL, "http") {
 			ytURL := "https://www.youtube.com/watch?v=" + cur.VideoID
-			info, err := stream.YtdlpGetInfo(ctx, ytURL, p.cfg.YouTubePOToken)
+			info, err := stream.YtdlpGetInfo(ctx, p.cfg, ytURL)
 			if err != nil {
 				return err
 			}

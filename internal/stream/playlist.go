@@ -24,16 +24,21 @@ type ytdlpPlaylistJSON struct {
 	WebpageUrl string              `json:"webpage_url"`
 }
 
-func YtdlpPlaylist(ctx context.Context, url string, poToken string) ([]*YTDLPInfo, error) {
+func YtdlpPlaylist(ctx context.Context, cfg *config.Config, url string) ([]*YTDLPInfo, error) {
 	cmd := ytdlp.New().
 		FlatPlaylist().
 		DumpJSON()
 
+	if cfg.YouTubeCookiesPath != "" {
+		cmd = cmd.Cookies(cfg.YouTubeCookiesPath)
+		ytdlpDebugf("playlist: using cookies from file")
+	}
+
 	// Add YouTube-specific extractor args
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
 		extractorArgs := "youtube:player_client=default,mweb"
-		if poToken != "" {
-			extractorArgs += ";po_token=" + poToken
+		if cfg.YouTubePOToken != "" {
+			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}
 		cmd = cmd.ExtractorArgs(extractorArgs)
 		ytdlpDebugf("playlist fetch with YouTube extractor args")
