@@ -47,9 +47,6 @@ type Player struct {
 	urlResolvedAt   time.Time
 
 	curPlay *playSession
-
-	lastSentPTS48 int64
-	lastSentMu    sync.Mutex
 }
 
 type playSession struct {
@@ -847,20 +844,17 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 	var media0 int64
 	started := false
 
+	// Monitor for reconnections
 	reconnectCh := sess.pcm.ReconnectCh()
 
 	for {
 		select {
 		case <-sess.ctx.Done():
 			return
-		case sig := <-reconnectCh:
-			slog.Info("PCM reconnection detected",
-				"guildID", p.guildID,
-				"lastSentPTS", sig.LastSentPTS48)
-
-			// Flush buffer to clear stale data
+		case <-reconnectCh:
+			// Reconnection detected - flush buffer to avoid stale data
+			slog.Info("PCM reconnection detected, flushing buffer", "guildID", p.guildID)
 			sess.buf.Flush()
-
 			// Reset timing anchors
 			started = false
 			wall0 = time.Time{}
@@ -878,9 +872,6 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 			started = true
 			wall0 = time.Now()
 			media0 = f.pts48
-			slog.Debug("producer started",
-				"guildID", p.guildID,
-				"startPTS", f.pts48)
 		}
 
 		copy(framePCM, f.data)
@@ -899,14 +890,15 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
 		target := wall0.Add(offset)
 
-		// Push to buffer with backpressure
+		// Push to buffer with backpressure handling
 		pushAttempts := 0
 		for {
 			if sess.buf.Push(outPkt, f.pts48, target) {
 				break
 			}
+			// Buffer full, wait a bit
 			pushAttempts++
-			if pushAttempts > 100 {
+			if pushAttempts > 100 { // ~1 second total wait
 				slog.Warn("buffer full timeout, dropping packet", "guildID", p.guildID)
 				break
 			}
@@ -1002,14 +994,6 @@ func (p *Player) consumePackets(
 		case <-sess.ctx.Done():
 			return
 		case vc.OpusSend <- pkt.data:
-			// Track last successfully sent PTS
-			p.lastSentMu.Lock()
-			p.lastSentPTS48 = pkt.pts48
-			p.lastSentMu.Unlock()
-
-			// Pass to PCMStreamer for reconnection reference
-			sess.pcm.SetLastDeliveredPTS(pkt.pts48)
-
 			updatePosition(pkt.pts48)
 			droppedCount = 0
 		case <-time.After(200 * time.Millisecond):
