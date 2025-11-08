@@ -55,6 +55,7 @@ type playSession struct {
 
 	pcm *stream.PCMStreamer
 	enc *stream.Encoder
+	buf *opusBuffer
 
 	doneCh chan struct{}
 }
@@ -407,11 +408,14 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 		return err
 	}
 
+	buffer := newOpusBuffer(100)
+
 	sess := &playSession{
 		ctx:    playCtx,
 		cancel: playCancel,
 		pcm:    pcm,
 		enc:    enc,
+		buf:    buffer,
 		doneCh: make(chan struct{}),
 	}
 
@@ -784,13 +788,14 @@ func (p *Player) sendLoop(
 	sess *playSession,
 ) {
 	defer func() {
+		sess.buf.Close()
 		sess.enc.Close()
 		sess.pcm.Close()
 		sess.cancel()
 		close(sess.doneCh)
 	}()
 
-	// Wait voice connection ready
+	// Wait for voice ready
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && !isVoiceReady(vc) {
 		select {
@@ -806,6 +811,14 @@ func (p *Player) sendLoop(
 	_ = vc.Speaking(true)
 	defer vc.Speaking(false)
 
+	// Start producer goroutine
+	go p.producePackets(sess, startPos)
+
+	// Consumer: send buffered packets
+	p.consumePackets(vc, sess, startPos, i)
+}
+
+func (p *Player) producePackets(sess *playSession, startPos int) {
 	r := bufio.NewReaderSize(sess.pcm.Stdout(), 128*1024)
 	framePCM := make([]byte, sess.enc.FrameBytes())
 
@@ -813,35 +826,22 @@ func (p *Player) sendLoop(
 	var media0 int64
 	started := false
 
-	updatePosition := func(pts48 int64) {
-		sec := int(pts48 / 48000)
-		p.mu.Lock()
-		// only update if still current session
-		if p.curPlay == sess {
-			p.PositionSec = sec
-		}
-		p.mu.Unlock()
-	}
-
 	for {
+		select {
+		case <-sess.ctx.Done():
+			return
+		default:
+		}
+
 		f, err := readPCMFrame(r)
 		if err != nil {
-			break
+			return
 		}
 
 		if !started {
 			started = true
 			wall0 = time.Now()
 			media0 = f.pts48
-			updatePosition(f.pts48)
-
-			// ensure we record that we've started, using the existing fields
-			p.mu.Lock()
-			if p.curPlay == sess {
-				// already set to playing in Play()
-				_ = startPos // consumed
-			}
-			p.mu.Unlock()
 		}
 
 		copy(framePCM, f.data)
@@ -851,7 +851,7 @@ func (p *Player) sendLoop(
 			outPkt = append(outPkt[:0], pkt...)
 			return nil
 		}); err != nil {
-			break
+			return
 		}
 		if len(outPkt) == 0 {
 			continue
@@ -859,7 +859,64 @@ func (p *Player) sendLoop(
 
 		offset := time.Duration((f.pts48 - media0) * int64(time.Second) / 48000)
 		target := wall0.Add(offset)
-		if d := time.Until(target); d > 0 {
+
+		// Push to buffer (non-blocking)
+		for {
+			if sess.buf.Push(outPkt, f.pts48, target) {
+				break
+			}
+			// Buffer full, wait a bit
+			select {
+			case <-sess.ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+}
+
+func (p *Player) consumePackets(
+	vc *discordgo.VoiceConnection,
+	sess *playSession,
+	startPos int,
+	i *discordgo.InteractionCreate,
+) {
+	// Minimum buffer threshold before starting playback
+	const minBufferPackets = 20 // ~400ms
+
+	// Wait for initial buffer
+	for sess.buf.BufferedCount() < minBufferPackets {
+		select {
+		case <-sess.ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	updatePosition := func(pts48 int64) {
+		sec := int(pts48 / 48000)
+		p.mu.Lock()
+		if p.curPlay == sess {
+			p.PositionSec = sec
+		}
+		p.mu.Unlock()
+	}
+
+	firstPacket := true
+
+	for {
+		pkt, ok := sess.buf.Pop(sess.ctx)
+		if !ok {
+			break
+		}
+
+		if firstPacket {
+			firstPacket = false
+			updatePosition(pkt.pts48)
+		}
+
+		// Pace playback based on target timestamp
+		if d := time.Until(pkt.targetTS); d > 0 {
 			select {
 			case <-sess.ctx.Done():
 				return
@@ -867,25 +924,36 @@ func (p *Player) sendLoop(
 			}
 		}
 
+		// Send with timeout
 		select {
 		case <-sess.ctx.Done():
 			return
-		case vc.OpusSend <- outPkt:
-			updatePosition(f.pts48)
+		case vc.OpusSend <- pkt.data:
+			updatePosition(pkt.pts48)
 		case <-time.After(200 * time.Millisecond):
-			// drop if blocked
+			// Packet dropped due to network congestion
+			slog.Debug("dropped packet due to send timeout", "guildID", p.guildID)
+		}
+
+		// Check buffer health
+		buffered := sess.buf.BufferedCount()
+		if buffered < 5 {
+			// Buffer running low, but keep going
+			slog.Debug("buffer running low", "count", buffered, "guildID", p.guildID)
 		}
 	}
 
-	// Finished or errored. Decide next action.
+	// Playback finished - handle next song logic
+	p.handlePlaybackEnd(sess, i)
+}
+
+func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCreate) {
 	p.mu.Lock()
-	// If superseded by another session, just exit.
 	if p.curPlay != sess {
 		p.mu.Unlock()
 		return
 	}
 
-	// Clear current session state
 	p.curPlay = nil
 	p.Status = StatusIdle
 	p.PositionSec = 0
@@ -911,6 +979,5 @@ func (p *Player) sendLoop(
 		return
 	}
 
-	// Start next or replay
 	_ = p.Play(context.Background(), nil, i)
 }
