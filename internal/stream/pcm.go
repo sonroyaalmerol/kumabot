@@ -386,7 +386,6 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.producedMu.Unlock()
 
 	if targetPTS <= 0 {
-		// Fallback to calculated PTS
 		targetPTS = s.streamStartPTS48 + s.totalSamplesProduced
 	}
 
@@ -466,7 +465,7 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.timeBase = st.TimeBase()
 
 	// Seek with safety margin
-	const safetyMarginSamples = 2880
+	const safetyMarginSamples = 4800
 	safeSeekTarget := targetPTS - safetyMarginSamples
 	if safeSeekTarget < 0 {
 		safeSeekTarget = 0
@@ -487,22 +486,12 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.inRate = 0
 	s.inLayout = astiav.ChannelLayout{}
 
-	// CRITICAL: Adjust totalSamplesProduced to match where we're seeking
-	// We're seeking to safeSeekTarget, so when decoder starts producing frames,
-	// they'll be at approximately safeSeekTarget in the original timeline
-	s.totalSamplesProduced = safeSeekTarget - s.streamStartPTS48
-	if s.totalSamplesProduced < 0 {
-		s.totalSamplesProduced = 0
-	}
-
-	pcmDebugf("reset totalSamplesProduced to %d (seekTarget=%d - streamStart=%d)",
-		s.totalSamplesProduced, safeSeekTarget, s.streamStartPTS48)
+	// DON'T set totalSamplesProduced yet - let first decoded frame set it
+	// Mark that we need to resync on first frame
+	s.totalSamplesProduced = -1 // Special marker
 
 	// Set exact resume point
 	s.resumeAt48 = targetPTS
-
-	// DON'T reset streamStartDetermined - keep the original timeline anchor
-	// streamStartDetermined stays true
 
 	// Signal reconnection
 	select {
@@ -510,7 +499,7 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	default:
 	}
 
-	pcmDebugf("reconnection prepared: will resume at PTS48=%d", targetPTS)
+	pcmDebugf("reconnection prepared: will resume at PTS48=%d (will resync on first frame)", targetPTS)
 	return nil
 }
 
@@ -706,25 +695,27 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	const frameBytes = 960 * 2 * 2
 	s.fifo = append(s.fifo, interleaved...)
 
-	for len(s.fifo) >= frameBytes {
-		// Determine stream start PTS on first frame emission
-		if !s.streamStartDetermined {
-			// Use source frame PTS
-			srcPTS := src.Pts()
-			if srcPTS == astiav.NoPtsValue {
-				srcPTS = 0
-			}
-			s.streamStartPTS48 = astiav.RescaleQ(srcPTS, s.timeBase, astiav.NewRational(1, 48000))
-			s.streamStartDetermined = true
-			s.totalSamplesProduced = 0
-			pcmDebugf("stream start determined: startPTS=%d", s.streamStartPTS48)
+	// Resync after reconnection using actual decoded PTS
+	if s.totalSamplesProduced < 0 && len(s.fifo) >= frameBytes {
+		srcPTS := src.Pts()
+		if srcPTS == astiav.NoPtsValue {
+			srcPTS = 0
 		}
+		actualStartPTS48 := astiav.RescaleQ(srcPTS, s.timeBase, astiav.NewRational(1, 48000))
 
+		// Fifo might have multiple frames worth - account for that
+		fifoSamples := int64(len(s.fifo) / 4)                 // bytes to samples
+		firstFramePTS := actualStartPTS48 + fifoSamples - 960 // PTS of first pending frame
+
+		s.totalSamplesProduced = firstFramePTS - s.streamStartPTS48
+
+		pcmDebugf("resynced after reconnection: firstDecodedPTS=%d fifoSamples=%d firstFramePTS=%d totalProduced=%d",
+			actualStartPTS48, fifoSamples, firstFramePTS, s.totalSamplesProduced)
+	}
+
+	for len(s.fifo) >= frameBytes {
 		// Calculate PTS from samples produced
 		pts := s.streamStartPTS48 + s.totalSamplesProduced
-
-		pcmDebugf("frame PTS: streamStart=%d + produced=%d = %d",
-			s.streamStartPTS48, s.totalSamplesProduced, pts)
 
 		// Sample-accurate trim logic on resume
 		if s.resumeAt48 >= 0 {
