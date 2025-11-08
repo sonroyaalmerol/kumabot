@@ -24,26 +24,32 @@ type ytdlpPlaylistJSON struct {
 
 func YtdlpPlaylist(ctx context.Context, url string) ([]*YTDLPInfo, error) {
 	cmd := ytdlp.New().
-		FlatPlaylist(). // --flat-playlist
-		DumpJSON()      // -J
+		FlatPlaylist().
+		DumpJSON()
 
+	ytdlpDebugf("fetching playlist: %s", url)
 	res, err := cmd.Run(ctx, url)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("yt-dlp playlist fetch failed for %s: %w", url, err)
 	}
 
 	infosParsed, err := res.GetExtractedInfo()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse yt-dlp playlist json for %s: %w", url, err)
 	}
 	if len(infosParsed) == 0 || infosParsed[0] == nil {
-		return nil, nil
+		return nil, fmt.Errorf("yt-dlp returned empty playlist info for %s", url)
 	}
 
 	pl := infosParsed[0]
+	ytdlpDebugf("playlist parsed: %d entries", len(pl.Entries))
+	
 	out := make([]*YTDLPInfo, 0, len(pl.Entries))
-	for _, e := range pl.Entries {
-		// Map the fields we care about into our YTDLPInfo shape.
+	for i, e := range pl.Entries {
+		if e == nil {
+			ytdlpDebugf("skipping nil entry at index %d", i)
+			continue
+		}
 		out = append(out, &YTDLPInfo{
 			Id:       e.ID,
 			Title:    s(e.Title),
@@ -53,5 +59,6 @@ func YtdlpPlaylist(ctx context.Context, url string) ([]*YTDLPInfo, error) {
 		})
 	}
 
+	ytdlpDebugf("playlist processed: %d valid entries", len(out))
 	return out, nil
 }

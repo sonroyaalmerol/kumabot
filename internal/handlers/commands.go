@@ -389,12 +389,20 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	h.ongoingSearchQueue.Store(true)
 	first := true
+	var lastErr error
+	errCount := 0
+	
 	for ev := range streamCh {
 		if ev.Info != "" {
+			slog.Debug("resolve info", "guildID", guildID, "info", ev.Info)
 		}
-		if ev.Err != nil && ev.Song.URL == "" {
-			slog.Debug("resolve query failed", "guildID", guildID, "userID", memberID, "query", query, "err", err)
-			continue
+		if ev.Err != nil {
+			lastErr = ev.Err
+			errCount++
+			slog.Warn("resolve query error", "guildID", guildID, "userID", memberID, "query", query, "err", ev.Err)
+			if ev.Song.URL == "" {
+				continue
+			}
 		}
 		if ev.Song.URL != "" {
 			ev.Song.RequestedBy = memberID
@@ -433,7 +441,12 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	h.ongoingSearchQueue.Store(false)
 
 	if first {
-		h.editReply(s, i, "no songs found")
+		if lastErr != nil {
+			h.editReply(s, i, fmt.Sprintf("failed to find songs: %v", lastErr))
+		} else {
+			h.editReply(s, i, "no songs found for query: "+query)
+		}
+		slog.Warn("no songs queued", "guildID", guildID, "query", query, "errCount", errCount, "lastErr", lastErr)
 		return
 	}
 
@@ -466,11 +479,13 @@ func (h *CommandHandler) cmdPlay(s *discordgo.Session, i *discordgo.InteractionC
 func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if player == nil || player.Conn == nil {
-		h.reply(s, i, "not connected", true)
+		h.reply(s, i, "not connected to voice", true)
+		slog.Debug("stop command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 	if player.Status != plib.StatusPlaying {
-		h.reply(s, i, "not currently playing", true)
+		h.reply(s, i, "not currently playing anything", true)
+		slog.Debug("stop command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.Status)
 		return
 	}
 	player.Stop()
@@ -481,7 +496,8 @@ func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionC
 func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if player == nil || player.Conn == nil {
-		h.reply(s, i, "not connected", true)
+		h.reply(s, i, "not connected to voice", true)
+		slog.Debug("disconnect command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 	player.Disconnect()
@@ -491,16 +507,28 @@ func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.Intera
 
 func (h *CommandHandler) cmdClear(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("clear command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
+	queueSize := player.QueueSize() // Assuming you have a method to get queue size
 	player.Clear()
-	slog.Info("cmd clear queue", "guildID", i.GuildID, "userID", userIDOf(i))
+	slog.Info("cmd clear queue", "guildID", i.GuildID, "userID", userIDOf(i), "clearedItems", queueSize)
 	h.reply(s, i, "clearer than a field after a fresh harvest", false)
 }
 
 func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("now-playing command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	cur := player.GetCurrent()
 	if cur == nil {
 		h.reply(s, i, "nothing is currently playing", true)
+		slog.Debug("now-playing command: no current song", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 
@@ -512,19 +540,27 @@ func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.Intera
 			Embeds: []*discordgo.MessageEmbed{embed},
 		},
 	}); err != nil {
-		slog.Warn("now-playing respond failed", "guildID", i.GuildID, "err", err)
+		slog.Error("now-playing respond failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("failed to display now playing: %v", err), true)
 	}
 }
 
 func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("fseek command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	cur := player.GetCurrent()
 	if cur == nil {
 		h.reply(s, i, "nothing is playing", true)
+		slog.Debug("fseek command failed: no current song", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 	if cur.IsLive {
 		h.reply(s, i, "can't seek in a livestream", true)
+		slog.Debug("fseek command failed: is livestream", "guildID", i.GuildID, "userID", userIDOf(i), "title", cur.Title)
 		return
 	}
 	var tstr string
@@ -535,20 +571,23 @@ func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.Interaction
 	}
 	sec := utils.ParseDurationString(tstr)
 	if sec <= 0 {
-		h.reply(s, i, "invalid time", true)
+		h.reply(s, i, fmt.Sprintf("invalid time format: %s", tstr), true)
+		slog.Debug("fseek command failed: invalid time", "guildID", i.GuildID, "userID", userIDOf(i), "input", tstr)
 		return
 	}
-	if sec+player.GetPosition() > cur.Length {
-		h.reply(s, i, "can't seek past the end of the song", true)
+	newPos := player.GetPosition() + sec
+	if newPos > cur.Length {
+		h.reply(s, i, fmt.Sprintf("can't seek past the end of the song (duration: %s)", utils.PrettyTime(cur.Length)), true)
+		slog.Debug("fseek command failed: beyond song length", "guildID", i.GuildID, "userID", userIDOf(i), "requested", newPos, "length", cur.Length)
 		return
 	}
-	if err := player.Seek(context.Background(), s, player.GetPosition()+sec); err != nil {
-		slog.Debug("seek failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, "seek failed", true)
+	if err := player.Seek(context.Background(), s, newPos); err != nil {
+		slog.Warn("fseek failed", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec, "err", err)
+		h.reply(s, i, fmt.Sprintf("seek failed: %v", err), true)
 		return
 	}
-	slog.Info("cmd fseek", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec)
-	h.reply(s, i, "👍 seeked to "+utils.PrettyTime(player.GetPosition()), false)
+	slog.Info("cmd fseek", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec, "newPosition", newPos)
+	h.reply(s, i, "👍 seeked to "+utils.PrettyTime(newPos), false)
 }
 
 func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -732,8 +771,14 @@ func (h *CommandHandler) cmdConfig(s *discordgo.Session, i *discordgo.Interactio
 
 func (h *CommandHandler) cmdLoop(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("loop command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if player.Status == plib.StatusIdle {
 		h.reply(s, i, "no song to loop!", true)
+		slog.Debug("loop command failed: player idle", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 	on := player.ToggleLoopSong()
@@ -747,10 +792,15 @@ func (h *CommandHandler) cmdLoop(s *discordgo.Session, i *discordgo.InteractionC
 
 func (h *CommandHandler) cmdLoopQueue(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("loop-queue command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	on, err := player.ToggleLoopQueue()
 	if err != nil {
-		slog.Warn("toggle loop queue failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, err.Error(), true)
+		slog.Warn("toggle loop queue failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("failed to toggle loop queue: %v", err), true)
 		return
 	}
 	slog.Info("cmd loop queue", "guildID", i.GuildID, "userID", userIDOf(i), "on", on)
@@ -773,13 +823,19 @@ func (h *CommandHandler) cmdMove(s *discordgo.Session, i *discordgo.InteractionC
 	}
 	if from < 1 || to < 1 {
 		h.reply(s, i, "position must be at least 1", true)
+		slog.Debug("move command failed: invalid positions", "guildID", i.GuildID, "userID", userIDOf(i), "from", from, "to", to)
 		return
 	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("move command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	item, err := player.Move(from, to)
 	if err != nil {
-		slog.Debug("move failed", "guildID", i.GuildID, "from", from, "to", to, "err", err)
-		h.reply(s, i, err.Error(), true)
+		slog.Warn("move failed", "guildID", i.GuildID, "userID", userIDOf(i), "from", from, "to", to, "err", err)
+		h.reply(s, i, fmt.Sprintf("move failed: %v", err), true)
 		return
 	}
 	slog.Info("cmd move", "guildID", i.GuildID, "userID", userIDOf(i), "from", from, "to", to, "title", item.Title)
@@ -788,9 +844,14 @@ func (h *CommandHandler) cmdMove(s *discordgo.Session, i *discordgo.InteractionC
 
 func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("next command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if err := player.Next(context.Background(), s); err != nil {
-		slog.Debug("next failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, "no song to skip to", true)
+		slog.Warn("next failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("failed to skip: %v", err), true)
 		return
 	}
 	slog.Info("cmd next", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -799,13 +860,19 @@ func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionC
 
 func (h *CommandHandler) cmdPause(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("pause command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if player.Status != plib.StatusPlaying {
 		h.reply(s, i, "not currently playing", true)
+		slog.Debug("pause command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.Status)
 		return
 	}
 	if err := player.Pause(); err != nil {
-		slog.Debug("pause failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, err.Error(), true)
+		slog.Warn("pause failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("pause failed: %v", err), true)
 		return
 	}
 	slog.Info("cmd pause", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -869,10 +936,20 @@ func (h *CommandHandler) cmdRemove(s *discordgo.Session, i *discordgo.Interactio
 			cnt = int(o.IntValue())
 		}
 	}
+	if pos < 1 || cnt < 1 {
+		h.reply(s, i, "position and range must be at least 1", true)
+		slog.Debug("remove command failed: invalid params", "guildID", i.GuildID, "userID", userIDOf(i), "pos", pos, "cnt", cnt)
+		return
+	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("remove command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if err := player.RemoveFromQueue(pos, cnt); err != nil {
-		slog.Debug("remove from queue failed", "guildID", i.GuildID, "pos", pos, "cnt", cnt, "err", err)
-		h.reply(s, i, err.Error(), true)
+		slog.Warn("remove from queue failed", "guildID", i.GuildID, "userID", userIDOf(i), "pos", pos, "cnt", cnt, "err", err)
+		h.reply(s, i, fmt.Sprintf("remove failed: %v", err), true)
 		return
 	}
 	slog.Info("cmd remove", "guildID", i.GuildID, "userID", userIDOf(i), "pos", pos, "cnt", cnt)
@@ -881,9 +958,14 @@ func (h *CommandHandler) cmdRemove(s *discordgo.Session, i *discordgo.Interactio
 
 func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("replay command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if err := player.Replay(context.Background(), s); err != nil {
-		slog.Debug("replay failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, err.Error(), true)
+		slog.Warn("replay failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("replay failed: %v", err), true)
 		return
 	}
 	slog.Info("cmd replay", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -892,17 +974,24 @@ func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.Interactio
 
 func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("resume command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if player.Status == plib.StatusPlaying {
 		h.reply(s, i, "already playing, give me a song name", true)
+		slog.Debug("resume command failed: already playing", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 	if player.GetCurrent() == nil {
 		h.reply(s, i, "nothing to play", true)
+		slog.Debug("resume command failed: no current song", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
 	if err := player.Resume(context.Background(), s); err != nil {
-		slog.Debug("resume failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, err.Error(), true)
+		slog.Warn("resume failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("resume failed: %v", err), true)
 		return
 	}
 	slog.Info("cmd resume", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -911,9 +1000,14 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 
 func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("unskip command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
 	if err := player.Back(context.Background(), s); err != nil {
-		slog.Debug("unskip/back failed", "guildID", i.GuildID, "err", err)
-		h.reply(s, i, "no song to go back to", true)
+		slog.Warn("unskip/back failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		h.reply(s, i, fmt.Sprintf("can't go back: %v", err), true)
 		return
 	}
 	cur := player.GetCurrent()
