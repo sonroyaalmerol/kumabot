@@ -55,10 +55,13 @@ type PCMStreamer struct {
 
 	reconnectCh chan ReconnectSignal
 
-	// crossfade state
 	resumeAt48        int64 // if >=0, trim decoded audio until this sample index (48k)
 	lastProducedPTS48 int64
 	producedMu        sync.Mutex
+
+	totalSamplesProduced  int64 // Total samples we've actually written
+	streamStartPTS48      int64 // PTS where stream actually starts (after skip)
+	streamStartDetermined bool
 }
 
 type ReconnectSignal struct {
@@ -383,11 +386,12 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.producedMu.Unlock()
 
 	if targetPTS <= 0 {
-		targetPTS = s.outPTS48Next
+		// Fallback to calculated PTS
+		targetPTS = s.streamStartPTS48 + s.totalSamplesProduced
 	}
 
-	pcmDebugf("reopenAndSeek: lastProduced=%d outNext=%d using=%d",
-		s.lastProducedPTS48, s.outPTS48Next, targetPTS)
+	pcmDebugf("reopenAndSeek: lastProduced=%d calculated=%d using=%d",
+		s.lastProducedPTS48, s.streamStartPTS48+s.totalSamplesProduced, targetPTS)
 
 	// Close existing contexts
 	if s.fc != nil {
@@ -483,10 +487,16 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	s.inRate = 0
 	s.inLayout = astiav.ChannelLayout{}
 
-	// Set exact resume point - this ensures we trim to exactly where we left off
+	// DON'T reset totalSamplesProduced or streamStartPTS48!
+	// We continue counting from where we left off
+
+	// Set exact resume point
 	s.resumeAt48 = targetPTS
 
-	// Signal reconnection - DON'T send the PTS, let consumer continue naturally
+	// Reset stream start flag so it recalculates relative to new stream position
+	s.streamStartDetermined = false
+
+	// Signal reconnection
 	select {
 	case s.reconnectCh <- ReconnectSignal{LastSentPTS48: targetPTS}:
 	default:
@@ -689,7 +699,26 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	s.fifo = append(s.fifo, interleaved...)
 
 	for len(s.fifo) >= frameBytes {
-		pts := s.outPTS48Next
+		// Determine stream start PTS on first frame emission
+		if !s.streamStartDetermined {
+			// Use source frame PTS, accounting for any decoder processing
+			srcPTS := src.Pts()
+			if srcPTS == astiav.NoPtsValue {
+				srcPTS = 0
+			}
+			s.streamStartPTS48 = astiav.RescaleQ(srcPTS, s.timeBase, astiav.NewRational(1, 48000))
+
+			// Add samples from this converted frame that came before current fifo position
+			// (accounts for any decoder skip/trim)
+			nbConverted := int64(len(interleaved) / 4) // bytes to samples
+			s.streamStartPTS48 += (nbConverted - int64(len(s.fifo)/4))
+
+			s.streamStartDetermined = true
+			pcmDebugf("stream start determined: startPTS=%d", s.streamStartPTS48)
+		}
+
+		// Calculate PTS from samples produced
+		pts := s.streamStartPTS48 + s.totalSamplesProduced
 
 		// Sample-accurate trim logic on resume
 		if s.resumeAt48 >= 0 {
@@ -701,7 +730,7 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 			// Case 1: Frame before resume point - skip
 			if frameEnd <= s.resumeAt48 {
 				pcmDebugf("  -> skipping frame (before resume point)")
-				s.outPTS48Next += 960
+				s.totalSamplesProduced += 960
 				s.fifo = s.fifo[frameBytes:]
 				continue
 			}
@@ -720,19 +749,20 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 				s.fifo = s.fifo[frameBytes:]
 				s.fifo = append(partial, s.fifo...)
 
-				s.outPTS48Next = s.resumeAt48
+				// Adjust sample counter
+				s.totalSamplesProduced = s.resumeAt48 - s.streamStartPTS48
 				s.resumeAt48 = -1
 
-				pcmDebugf("  -> resume aligned at PTS48=%d", s.outPTS48Next)
+				pcmDebugf("  -> resume aligned at PTS48=%d", s.streamStartPTS48+s.totalSamplesProduced)
 				continue
 			}
 
-			// Case 3: Frame at or after resume - aligned
+			// Case 3: Frame aligned
 			pcmDebugf("  -> frame aligned, resuming normal playback")
 			s.resumeAt48 = -1
 		}
 
-		// Normal emission - NO CROSSFADE
+		// Normal emission
 		chunk := make([]byte, frameBytes)
 		copy(chunk, s.fifo[:frameBytes])
 		s.fifo = s.fifo[frameBytes:]
@@ -744,7 +774,8 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		}); err != nil {
 			return err
 		}
-		s.outPTS48Next += 960
+
+		s.totalSamplesProduced += 960
 	}
 	return nil
 }
@@ -775,7 +806,6 @@ func (s *PCMStreamer) flushSWR() error {
 			return err
 		}
 
-		// Interleave like convertAndWritePCM using declared format
 		nb := s.dstFrame.NbSamples()
 		if nb <= 0 {
 			continue
@@ -820,30 +850,58 @@ func (s *PCMStreamer) flushSWR() error {
 
 		const frameBytes = 960 * 2 * 2
 		s.fifo = append(s.fifo, interleaved...)
+
 		for len(s.fifo) >= frameBytes {
-			pts := s.outPTS48Next
+			// Calculate PTS from samples produced (same as convertAndWritePCM)
+			pts := s.streamStartPTS48 + s.totalSamplesProduced
+
+			// Sample-accurate trim logic on resume
 			if s.resumeAt48 >= 0 {
-				if pts+960 <= s.resumeAt48 {
-					s.outPTS48Next += 960
+				frameStart := pts
+				frameEnd := pts + 960
+
+				pcmDebugf("flush trim check: frame=[%d..%d) resume=%d", frameStart, frameEnd, s.resumeAt48)
+
+				// Case 1: Frame before resume point - skip
+				if frameEnd <= s.resumeAt48 {
+					pcmDebugf("  -> flush: skipping frame (before resume point)")
+					s.totalSamplesProduced += 960
 					s.fifo = s.fifo[frameBytes:]
 					continue
 				}
-				if pts < s.resumeAt48 && s.resumeAt48 < pts+960 {
-					offSamp := int(s.resumeAt48 - pts)
-					byteOff := offSamp * 4
-					partial := make([]byte, frameBytes-byteOff)
-					copy(partial, s.fifo[byteOff:frameBytes])
+
+				// Case 2: Resume point inside frame - trim
+				if frameStart < s.resumeAt48 && s.resumeAt48 < frameEnd {
+					offsetSamples := int(s.resumeAt48 - frameStart)
+					offsetBytes := offsetSamples * 4
+
+					pcmDebugf("  -> flush: trimming %d samples (%d bytes) from frame start", offsetSamples, offsetBytes)
+
+					partialLen := frameBytes - offsetBytes
+					partial := make([]byte, partialLen)
+					copy(partial, s.fifo[offsetBytes:frameBytes])
+
 					s.fifo = s.fifo[frameBytes:]
 					s.fifo = append(partial, s.fifo...)
-					s.outPTS48Next = s.resumeAt48
+
+					// Adjust sample counter to resume point
+					s.totalSamplesProduced = s.resumeAt48 - s.streamStartPTS48
 					s.resumeAt48 = -1
+
+					pcmDebugf("  -> flush: resume aligned at PTS48=%d", s.streamStartPTS48+s.totalSamplesProduced)
 					continue
 				}
+
+				// Case 3: Frame aligned
+				pcmDebugf("  -> flush: frame aligned, resuming normal playback")
 				s.resumeAt48 = -1
 			}
+
+			// Normal emission
 			chunk := make([]byte, frameBytes)
 			copy(chunk, s.fifo[:frameBytes])
 			s.fifo = s.fifo[frameBytes:]
+
 			if err := s.writePCMFrameTracked(PCMFrame{
 				Data:      chunk,
 				PTS48:     pts,
@@ -851,7 +909,8 @@ func (s *PCMStreamer) flushSWR() error {
 			}); err != nil {
 				return err
 			}
-			s.outPTS48Next += 960
+
+			s.totalSamplesProduced += 960
 		}
 	}
 	return nil
