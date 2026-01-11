@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -24,8 +24,6 @@ type CommandHandler struct {
 	cache *cache.FileCache
 	pm    *plib.PlayerManager
 	favs  *repository.FavoritesService
-
-	ongoingSearchQueue atomic.Bool
 }
 
 func NewCommandHandler(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, pm *plib.PlayerManager, favs *repository.FavoritesService) *CommandHandler {
@@ -300,6 +298,30 @@ func (h *CommandHandler) reply(s *discordgo.Session, i *discordgo.InteractionCre
 	}
 }
 
+func (h *CommandHandler) smartReply(s *discordgo.Session, i *discordgo.InteractionCreate, content string, ephemeral bool) {
+	flags := discordgo.MessageFlags(0)
+	if ephemeral {
+		flags = discordgo.MessageFlags(1 << 6)
+	}
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: content,
+			Flags:   flags,
+		},
+	})
+
+	if err != nil {
+		_, editErr := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
+		})
+		if editErr != nil {
+			slog.Warn("both respond and edit failed", "err", editErr)
+		}
+	}
+}
+
 func (h *CommandHandler) deferReply(s *discordgo.Session, i *discordgo.InteractionCreate, ephemeral bool) {
 	flags := uint64(0)
 	if ephemeral {
@@ -385,93 +407,72 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		return
 	}
 
+	player.SetSearching(true)
+	defer player.SetSearching(false)
+
 	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split)
 
-	h.ongoingSearchQueue.Store(true)
-	first := true
-	var lastErr error
-	errCount := 0
+	var songsToEnqueue []plib.SongMetadata
+	var infoMsg string
 
 	for ev := range streamCh {
-		if ev.Info != "" {
-			slog.Debug("resolve info", "guildID", guildID, "info", ev.Info)
-		}
 		if ev.Err != nil {
-			lastErr = ev.Err
-			errCount++
-			slog.Warn("resolve query error", "guildID", guildID, "userID", memberID, "query", query, "err", ev.Err)
-			if ev.Song.URL == "" {
-				continue
-			}
+			slog.Warn("resolve error", "err", ev.Err)
+			continue
 		}
 		if ev.Song.URL != "" {
 			ev.Song.RequestedBy = memberID
 			ev.Song.AddedInChan = i.ChannelID
-			player.Add(ev.Song, false)
-			if first {
-				first = false
-				player.MaybeAutoplayAfterAdd(ctx, s, i)
-				msg := fmt.Sprintf("%s added to the%s queue%s%s",
-					utils.EscapeMd(ev.Song.Title),
-					func() string {
-						if immediate {
-							return " front of the"
-						}
-						return ""
-					}(),
-					func() string {
-						if skip {
-							return " and current track skipped"
-						}
-						return ""
-					}(),
-					func() string {
-						if ev.Info != "" {
-							return " (" + ev.Info + ")"
-						}
-						return ""
-					}(),
-				)
-				h.editReply(s, i, msg)
-				slog.Debug("enqueued song", "guildID", guildID, "title", ev.Song.Title, "immediate", immediate, "shuffle", shuffleAdd, "split", split, "skip", skip)
+			songsToEnqueue = append(songsToEnqueue, ev.Song)
+			if infoMsg == "" && ev.Info != "" {
+				infoMsg = ev.Info
 			}
 		}
 	}
 
-	h.ongoingSearchQueue.Store(false)
-
-	if first {
-		errorMsg := "failed to find songs"
-		if lastErr != nil {
-			errStr := lastErr.Error()
-			if strings.Contains(errStr, "ERROR:") {
-				lines := strings.Split(errStr, "\n")
-				for _, line := range lines {
-					if strings.HasPrefix(strings.TrimSpace(line), "ERROR:") {
-						errorMsg = strings.TrimSpace(line)
-						break
-					}
-				}
-			} else if len(errStr) > 200 {
-				errorMsg = "error: ..." + errStr[len(errStr)-200:]
-			} else {
-				errorMsg = fmt.Sprintf("error: %v", lastErr)
-			}
-		}
-
-		// Ensure message doesn't exceed Discord's limit
-		if len(errorMsg) > 1900 {
-			errorMsg = errorMsg[:1900] + "..."
-		}
-
-		h.editReply(s, i, errorMsg)
-
-		slog.Warn("no songs queued", "guildID", guildID, "query", query, "errCount", errCount, "lastErr", lastErr)
+	if len(songsToEnqueue) == 0 {
+		h.editReply(s, i, "Couldn't find any songs for that query.")
 		return
 	}
+
 	if shuffleAdd {
-		//TODO: shuffle
+		rand.Shuffle(len(songsToEnqueue), func(i, j int) {
+			songsToEnqueue[i], songsToEnqueue[j] = songsToEnqueue[j], songsToEnqueue[i]
+		})
 	}
+
+	if immediate {
+		for i := len(songsToEnqueue) - 1; i >= 0; i-- {
+			player.Add(songsToEnqueue[i], true)
+		}
+	} else {
+		for _, song := range songsToEnqueue {
+			player.Add(song, false)
+		}
+	}
+
+	if skip {
+		_ = player.Next(ctx, s, i)
+	}
+
+	player.MaybeAutoplayAfterAdd(ctx, s, i)
+
+	firstSongTitle := utils.EscapeMd(songsToEnqueue[0].Title)
+	msg := ""
+	if len(songsToEnqueue) > 1 {
+		msg = fmt.Sprintf("Queued **%d** tracks starting with **%s**", len(songsToEnqueue), firstSongTitle)
+	} else {
+		msg = fmt.Sprintf("Queued **%s**", firstSongTitle)
+	}
+
+	if immediate {
+		msg += " to the front"
+	}
+	if infoMsg != "" {
+		msg += " (" + infoMsg + ")"
+	}
+
+	h.editReply(s, i, msg)
 }
 
 func (h *CommandHandler) cmdPlay(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -540,27 +541,27 @@ func (h *CommandHandler) cmdClear(s *discordgo.Session, i *discordgo.Interaction
 func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 	if player == nil {
-		h.reply(s, i, "internal player error", true)
-		slog.Error("now-playing command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		h.smartReply(s, i, "internal player error", true)
 		return
 	}
 	cur := player.GetCurrent()
 	if cur == nil {
-		h.reply(s, i, "nothing is currently playing", true)
-		slog.Debug("now-playing command: no current song", "guildID", i.GuildID, "userID", userIDOf(i))
+		h.smartReply(s, i, "nothing is currently playing", true)
 		return
 	}
 
-	slog.Debug("cmd now-playing", "guildID", i.GuildID, "userID", userIDOf(i), "title", cur.Title)
 	embed := plib.BuildPlayingEmbed(player)
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{embed},
 		},
-	}); err != nil {
-		slog.Error("now-playing respond failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
-		h.reply(s, i, fmt.Sprintf("failed to display now playing: %v", err), true)
+	})
+	if err != nil {
+		_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Embeds: &[]*discordgo.MessageEmbed{embed},
+		})
 	}
 }
 
@@ -927,7 +928,7 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
 
-	embed, err := plib.BuildQueueEmbed(player, page, pageSize, h.ongoingSearchQueue.Load())
+	embed, err := plib.BuildQueueEmbed(player, page, pageSize)
 	if err != nil {
 		slog.Debug("build queue embed failed", "guildID", i.GuildID, "page", page, "pageSize", pageSize, "err", err)
 		h.reply(s, i, err.Error(), true)

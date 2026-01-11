@@ -130,15 +130,21 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func getNonBotSize(s *discordgo.Session, guildID, channelID string) int {
-	g, _ := s.State.Guild(guildID)
-	if g == nil {
+	g, err := s.State.Guild(guildID)
+	if err != nil {
 		return 0
 	}
 	n := 0
 	for _, vs := range g.VoiceStates {
 		if vs.ChannelID == channelID {
-			m, _ := s.State.Member(guildID, vs.UserID)
-			if m != nil && m.User != nil && !m.User.Bot {
+			if vs.Member != nil && vs.Member.User != nil {
+				if !vs.Member.User.Bot {
+					n++
+				}
+				continue
+			}
+			m, err := s.State.Member(guildID, vs.UserID)
+			if err == nil && m.User != nil && !m.User.Bot {
 				n++
 			}
 		}

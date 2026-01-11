@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -44,10 +45,11 @@ type Player struct {
 	DisconnectTimer *time.Timer
 	LastURL         string
 
-	requestedSeek   *int
-	lastResolvedURL string
-	lastVideoID     string
-	urlResolvedAt   time.Time
+	requestedSeek      *int
+	lastResolvedURL    string
+	lastVideoID        string
+	urlResolvedAt      time.Time
+	ongoingSearchQueue atomic.Bool
 
 	curPlay *playSession
 }
@@ -73,6 +75,14 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 		Status:     StatusIdle,
 		DefaultVol: DefaultVolume,
 	}
+}
+
+func (p *Player) IsSearching() bool {
+	return p.ongoingSearchQueue.Load()
+}
+
+func (p *Player) SetSearching(s bool) {
+	p.ongoingSearchQueue.Store(s)
 }
 
 func (p *Player) setIdleState() {

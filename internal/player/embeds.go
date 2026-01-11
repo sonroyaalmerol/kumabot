@@ -85,7 +85,6 @@ func BuildQueueEmbed(
 	p *Player,
 	page int,
 	pageSize int,
-	ongoingQueue bool,
 ) (*discordgo.MessageEmbed, error) {
 	const maxDesc = 4096
 
@@ -145,7 +144,7 @@ func BuildQueueEmbed(
 	desc += fmt.Sprintf("%s `[ %s ]`\n\n", bar, elapsed)
 
 	// Show resolving note inline in the description so users don’t miss it
-	if ongoingQueue {
+	if p.IsSearching() {
 		desc += "Note: still resolving more items… they will appear here as they’re ready.\n\n"
 	}
 
@@ -212,7 +211,7 @@ func BuildQueueEmbed(
 			{
 				Name: "Resolving",
 				Value: func() string {
-					if ongoingQueue {
+					if p.IsSearching() {
 						return "Yes"
 					} else {
 						return "No"
