@@ -126,6 +126,7 @@ func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, gu
 		},
 		{Name: "loop", Description: "toggle looping the current song"},
 		{Name: "loop-queue", Description: "toggle looping the entire queue"},
+		{Name: "shuffle", Description: "toggle shuffling the entire queue"},
 		{
 			Name:        "move",
 			Description: "move songs within the queue",
@@ -260,6 +261,8 @@ func (h *CommandHandler) handleChatCommand(s *discordgo.Session, i *discordgo.In
 		h.cmdLoop(s, i)
 	case "loop-queue":
 		h.cmdLoopQueue(s, i)
+	case "shuffle":
+		h.cmdShuffle(s, i)
 	case "move":
 		h.cmdMove(s, i)
 	case "next":
@@ -827,6 +830,22 @@ func (h *CommandHandler) cmdLoopQueue(s *discordgo.Session, i *discordgo.Interac
 		h.reply(s, i, "looped queue :)", false)
 	} else {
 		h.reply(s, i, "stopped looping queue :(", false)
+	}
+}
+
+func (h *CommandHandler) cmdShuffle(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("loop-queue command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
+	on := player.ToggleShuffle()
+	slog.Info("cmd shuffle queue", "guildID", i.GuildID, "userID", userIDOf(i), "on", on)
+	if on {
+		h.reply(s, i, "shuffled queue :)", false)
+	} else {
+		h.reply(s, i, "stopped shuffling queue :(", false)
 	}
 }
 
