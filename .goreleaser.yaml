@@ -6,37 +6,18 @@ before:
     - go mod tidy
 
 builds:
-  - env:
-      - CGO_ENABLED=0
-    main: ./cmd/kumabot 
+  - id: kumabot
+    main: ./cmd/kumabot
+    env:
+      - CGO_ENABLED=1
     goos:
       - linux
     goarch:
       - amd64
-      - arm64
 
 archives:
   - formats: ["tar.gz"]
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
-      - goos: windows
-        formats: ["zip"]
-
-checksum:
-  name_template: "checksums.txt"
-
-changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
+    name_template: "{{ .ProjectName }}_{{ title .Os }}_{{ .Arch }}"
 
 release:
   mode: replace
@@ -44,39 +25,25 @@ release:
 
 dockers:
   - image_templates:
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
     dockerfile: Dockerfile
     use: buildx
     goarch: amd64
     build_flag_templates:
       - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
 
   - image_templates:
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
     dockerfile: Dockerfile
     use: buildx
     goarch: arm64
     build_flag_templates:
       - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
 
 docker_manifests:
-  - name_template: "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}"
-    image_templates:
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
-  - name_template: "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:latest"
-    skip_push: "{{ .Prerelease }}"
-    image_templates:
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+  # GHCR Manifests
   - name_template: "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}"
     image_templates:
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
@@ -86,3 +53,14 @@ docker_manifests:
     image_templates:
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+
+  # Docker Hub Manifests
+  - name_template: "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}"
+    image_templates:
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+  - name_template: "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:latest"
+    skip_push: "{{ .Prerelease }}"
+    image_templates:
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
