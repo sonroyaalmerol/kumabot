@@ -38,30 +38,50 @@ changelog:
       - "^test:"
 
 release:
-  draft: false 
-  replace_existing: true
+  mode: replace
+  draft: false
 
 dockers:
   - image_templates:
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}"
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:latest"
-      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}"
-      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:latest"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
+      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
     dockerfile: Dockerfile
     use: buildx
+    goarch: amd64
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.version={{ .Version }}"
-    skip_push: "{{ .Prerelease }}"
+
+  - image_templates:
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    goarch: arm64
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
 
 docker_manifests:
   - name_template: "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}"
     image_templates:
       - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
       - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+  - name_template: "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:latest"
+    skip_push: "{{ .Prerelease }}"
+    image_templates:
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
   - name_template: "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
+      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:latest"
+    skip_push: "{{ .Prerelease }}"
     image_templates:
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-amd64"
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}-arm64"
