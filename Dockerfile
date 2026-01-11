@@ -1,3 +1,4 @@
+# --- BUILD STAGE ---
 FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS builder
 
 ARG TARGETARCH
@@ -8,14 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libavutil-dev libswresample-dev libswscale-dev libavfilter-dev libopus-dev \
   && rm -rf /var/lib/apt/lists/*
 
-COPY go.mod go.sum ./
-RUN go mod download
-
 COPY . .
 
-# Build the binary inside Docker to handle CGO correctly for the TARGETARCH
+RUN go mod download
 RUN CGO_ENABLED=1 GOARCH=$TARGETARCH go build -ldflags "-s -w" -o /kumabot ./cmd/kumabot
 
+# --- RUNTIME STAGE ---
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

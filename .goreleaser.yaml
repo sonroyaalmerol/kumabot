@@ -13,22 +13,26 @@ release:
   mode: replace
   draft: false
 
-docker_builders:
-  - id: kumabot-docker
+dockers_v2:
+  - id: kumabot
     dockerfile: Dockerfile
+    extra_files:
+      - cmd/
+      - internal/
+      - go.mod
+      - go.sum
     images:
-      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}"
-      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:latest"
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}"
-      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:latest"
-    
-    flags:
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-    
+      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}"
+      - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}"
+    tags:
+      # Always create a tag for the version (e.g., v1.0.0 or v1.0.0-rc1)
+      - "{{ .Tag }}"
+      # Only create the "latest" tag if this is NOT a pre-release
+      - "{{ if not .Prerelease }}latest{{ end }}"
     platforms:
       - linux/amd64
       - linux/arm64
-
-    skip_push: "{{ .Prerelease }}"
+    labels:
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
