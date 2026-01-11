@@ -5,6 +5,18 @@ before:
   hooks:
     - go mod tidy
 
+builds:
+  - id: kumabot
+    main: ./cmd/kumabot
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    skip: true
+
 archives:
   - formats: ["tar.gz"]
     name_template: "{{ .ProjectName }}_{{ title .Os }}_{{ .Arch }}"
