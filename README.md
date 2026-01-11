@@ -15,23 +15,38 @@ It is a high-performance, low-footprint Discord music bot written in Go, utilizi
 
 The bot is configured via environment variables.
 
+### Discord Auth
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| **Required** | | |
 | DISCORD_TOKEN | Your Discord Bot Token. | Required |
-| **YouTube Auth** | | |
+
+### YouTube Auth
+| Variable | Description | Default |
+| :--- | :--- | :--- |
 | YOUTUBE_PO_TOKEN | Proof of Origin token to bypass bot detection. | "" |
 | YOUTUBE_COOKIES_PATH | Path to cookies.txt for YouTube authentication. | $DATA_DIR/cookies.txt |
-| **Data & Cache** | | |
-| DATA_DIR | Root directory for DB, cookies, and cache. | ./data |
-| CACHE_LIMIT | Max size of the audio cache in bytes. | 2147483648 (2GB) |
-| **External APIs** | | |
+
+### Spotify Auth
+| Variable | Description | Default |
+| :--- | :--- | :--- |
 | SPOTIFY_CLIENT_ID | Client ID for Spotify link resolution. | "" |
 | SPOTIFY_CLIENT_SECRET| Client Secret for Spotify link resolution. | "" |
-| **SponsorBlock** | | |
+
+### Data & Cache
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| DATA_DIR | Root directory for DB, cookies, and cache. | ./data |
+| CACHE_LIMIT | Max size of the audio cache in bytes. | 2147483648 (2GB) |
+
+### SponsorBlock
+| Variable | Description | Default |
+| :--- | :--- | :--- |
 | ENABLE_SPONSORBLOCK | Enable skipping segments via SponsorBlock. | false |
 | SPONSORBLOCK_TIMEOUT | Timeout in minutes for API requests. | 5 |
-| **Bot Behavior** | | |
+
+### Bot Behavior
+| Variable | Description | Default |
+| :--- | :--- | :--- |
 | BOT_STATUS | Bot presence status (online, idle, dnd). | online |
 | BOT_ACTIVITY | Text to display in the bot's status. | music |
 | REGISTER_COMMANDS_ON_BOT | true for global commands; false for per-guild. | false |
