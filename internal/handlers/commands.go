@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -366,7 +365,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	i *discordgo.InteractionCreate,
 	query string,
 	immediate bool,
-	shuffleAdd bool,
+	shuffleRequested bool,
 	split bool,
 	skip bool,
 ) {
@@ -376,13 +375,18 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	chID, ok := userInVoice(s, guildID, memberID)
 	if !ok {
+		slog.Debug("user not in voice", "guildID", guildID, "userID", memberID)
 		h.reply(s, i, "gotta be in a voice channel", true)
 		return
 	}
 
 	ctx := context.Background()
-	set, err := h.repo.UpsertSettings(ctx, guildID)
+	if _, err := h.repo.UpsertSettings(ctx, guildID); err != nil {
+		slog.Warn("upsert settings failed", "guildID", guildID, "err", err)
+	}
+	set, err := h.repo.GetSettings(ctx, guildID)
 	if err != nil {
+		slog.Error("get settings failed", "guildID", guildID, "err", err)
 		h.reply(s, i, "internal error", true)
 		return
 	}
@@ -390,9 +394,20 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	h.deferReply(s, i, set.QAddEphemeral)
 
 	player := h.pm.Get(h.cfg, h.repo, h.cache, guildID)
+	if player == nil {
+		slog.Error("player manager returned nil", "guildID", guildID)
+		h.editReply(s, i, "internal player error")
+		return
+	}
+
 	if err := player.Connect(s, guildID, chID, textID); err != nil {
+		slog.Warn("voice connect failed", "guildID", guildID, "channelID", chID, "err", err)
 		h.editReply(s, i, "couldn't connect to channel")
 		return
+	}
+
+	if shuffleRequested {
+		player.ShuffleOn()
 	}
 
 	player.SetSearching(true)
@@ -400,8 +415,9 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split)
 
-	var songsToEnqueue []plib.SongMetadata
+	var firstSongTitle string
 	var infoMsg string
+	count := 0
 	firstSongProcessed := false
 
 	for ev := range streamCh {
@@ -410,63 +426,46 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 			continue
 		}
 		if ev.Song.URL != "" {
+			count++
 			ev.Song.RequestedBy = memberID
 			ev.Song.AddedInChan = i.ChannelID
 
+			player.Add(ev.Song, immediate)
+
 			if !firstSongProcessed {
 				firstSongProcessed = true
-				player.Add(ev.Song, immediate)
+				firstSongTitle = ev.Song.Title
+				if infoMsg == "" && ev.Info != "" {
+					infoMsg = ev.Info
+				}
 
 				if skip {
 					_ = player.Next(ctx, s, i)
 				} else {
 					player.MaybeAutoplayAfterAdd(ctx, s, i)
 				}
-
-				songsToEnqueue = append(songsToEnqueue, ev.Song)
-			} else {
-				songsToEnqueue = append(songsToEnqueue, ev.Song)
-			}
-
-			if infoMsg == "" && ev.Info != "" {
-				infoMsg = ev.Info
 			}
 		}
 	}
 
-	if len(songsToEnqueue) == 0 {
+	if count == 0 {
 		h.editReply(s, i, "Couldn't find any songs for that query.")
 		return
 	}
 
-	if len(songsToEnqueue) > 1 {
-		remaining := songsToEnqueue[1:]
-		if shuffleAdd {
-			rand.Shuffle(len(remaining), func(i, j int) {
-				remaining[i], remaining[j] = remaining[j], remaining[i]
-			})
-		}
-
-		for _, song := range remaining {
-			// If immediate was requested, the first song is at pos 1,
-			// so we add the rest behind it
-			player.Add(song, immediate)
-		}
-	}
-
-	firstSongTitle := utils.EscapeMd(songsToEnqueue[0].Title)
 	msg := ""
-	if len(songsToEnqueue) > 1 {
-		msg = fmt.Sprintf("Queued **%d** tracks starting with **%s**", len(songsToEnqueue), firstSongTitle)
-		if shuffleAdd {
-			msg += " (rest shuffled)"
-		}
+	escapedTitle := utils.EscapeMd(firstSongTitle)
+	if count > 1 {
+		msg = fmt.Sprintf("queued **%d** tracks starting with **%s**", count, escapedTitle)
 	} else {
-		msg = fmt.Sprintf("Queued **%s**", firstSongTitle)
+		msg = fmt.Sprintf("queued **%s**", escapedTitle)
 	}
 
 	if immediate {
 		msg += " to the front"
+	}
+	if shuffleRequested {
+		msg += " (Shuffle Mode active)"
 	}
 	if infoMsg != "" {
 		msg += " (" + infoMsg + ")"

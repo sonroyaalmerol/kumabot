@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ type Player struct {
 	DefaultVol      int
 	LoopSong        bool
 	LoopQueue       bool
+	ShuffleMode     bool
 	DisconnectTimer *time.Timer
 	LastURL         string
 
@@ -49,7 +51,7 @@ type Player struct {
 	lastResolvedURL    string
 	lastVideoID        string
 	urlResolvedAt      time.Time
-	ongoingSearchQueue atomic.Bool
+	ongoingSearchQueue atomic.Int32
 
 	curPlay *playSession
 }
@@ -78,11 +80,15 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 }
 
 func (p *Player) IsSearching() bool {
-	return p.ongoingSearchQueue.Load()
+	return p.ongoingSearchQueue.Load() > 0
 }
 
 func (p *Player) SetSearching(s bool) {
-	p.ongoingSearchQueue.Store(s)
+	if s {
+		p.ongoingSearchQueue.Add(1)
+	} else {
+		p.ongoingSearchQueue.Add(-1)
+	}
 }
 
 func (p *Player) setIdleState() {
@@ -673,6 +679,27 @@ func (p *Player) ToggleLoopQueue() (bool, error) {
 	return p.LoopQueue, nil
 }
 
+func (p *Player) ToggleShuffle() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ShuffleMode = !p.ShuffleMode
+	return p.ShuffleMode
+}
+
+func (p *Player) ShuffleOn() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ShuffleMode = true
+	return p.ShuffleMode
+}
+
+func (p *Player) ShuffleOff() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ShuffleMode = false
+	return p.ShuffleMode
+}
+
 // Move moves an item in the queue (1-based positions for the queue after current song)
 func (p *Player) Move(from int, to int) (SongMetadata, error) {
 	p.mu.Lock()
@@ -801,23 +828,19 @@ func (p *Player) scheduleIdleDisconnect() {
 	}
 
 	p.DisconnectTimer = time.AfterFunc(wait, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
 		if p.IsSearching() {
-			slog.Debug("rescheduling idle disconnect: currently searching", "guildID", p.guildID)
-			p.scheduleIdleDisconnect()
+			p.DisconnectTimer.Reset(wait)
 			return
 		}
 
-		p.mu.Lock()
 		vc := p.Conn
 		shouldDisconnect := p.Status == StatusIdle && p.curPlay == nil && vc != nil
 		if shouldDisconnect {
 			p.Conn = nil
 			p.ConnChannelID = ""
-		}
-		p.mu.Unlock()
-
-		if shouldDisconnect {
-			slog.Info("executing idle disconnect", "guildID", p.guildID)
 			_ = p.safeDisconnect(vc)
 		}
 	})
@@ -1071,13 +1094,17 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 		seek0 := 0
 		p.requestedSeek = &seek0
 		hasNext = true
-	} else if p.LoopQueue && len(p.SongQueue) > 1 {
-		if p.Qpos >= 0 && p.Qpos < len(p.SongQueue) {
-			item := p.SongQueue[p.Qpos]
-			p.SongQueue = append(p.SongQueue[:p.Qpos], p.SongQueue[p.Qpos+1:]...)
-			p.SongQueue = append(p.SongQueue, item)
-		}
-		hasNext = p.Qpos >= 0 && p.Qpos < len(p.SongQueue)
+	} else if p.ShuffleMode && len(p.SongQueue) > (p.Qpos+1) {
+		remainingCount := len(p.SongQueue) - (p.Qpos + 1)
+		randomIndex := (p.Qpos + 1) + rand.IntN(remainingCount)
+
+		p.SongQueue[p.Qpos+1], p.SongQueue[randomIndex] = p.SongQueue[randomIndex], p.SongQueue[p.Qpos+1]
+
+		p.Qpos++
+		hasNext = true
+	} else if p.LoopQueue && len(p.SongQueue) > 0 {
+		p.Qpos = (p.Qpos + 1) % len(p.SongQueue)
+		hasNext = true
 	} else {
 		p.Qpos++
 		hasNext = p.Qpos < len(p.SongQueue)
