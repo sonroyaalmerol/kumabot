@@ -376,18 +376,13 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	chID, ok := userInVoice(s, guildID, memberID)
 	if !ok {
-		slog.Debug("user not in voice", "guildID", guildID, "userID", memberID)
 		h.reply(s, i, "gotta be in a voice channel", true)
 		return
 	}
 
 	ctx := context.Background()
-	if _, err := h.repo.UpsertSettings(ctx, guildID); err != nil {
-		slog.Warn("upsert settings failed", "guildID", guildID, "err", err)
-	}
-	set, err := h.repo.GetSettings(ctx, guildID)
+	set, err := h.repo.UpsertSettings(ctx, guildID)
 	if err != nil {
-		slog.Error("get settings failed", "guildID", guildID, "err", err)
 		h.reply(s, i, "internal error", true)
 		return
 	}
@@ -395,14 +390,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	h.deferReply(s, i, set.QAddEphemeral)
 
 	player := h.pm.Get(h.cfg, h.repo, h.cache, guildID)
-	if player == nil {
-		slog.Error("player manager returned nil", "guildID", guildID)
-		h.editReply(s, i, "internal player error")
-		return
-	}
-
 	if err := player.Connect(s, guildID, chID, textID); err != nil {
-		slog.Warn("voice connect failed", "guildID", guildID, "channelID", chID, "err", err)
 		h.editReply(s, i, "couldn't connect to channel")
 		return
 	}
@@ -414,6 +402,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	var songsToEnqueue []plib.SongMetadata
 	var infoMsg string
+	firstSongProcessed := false
 
 	for ev := range streamCh {
 		if ev.Err != nil {
@@ -423,7 +412,22 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		if ev.Song.URL != "" {
 			ev.Song.RequestedBy = memberID
 			ev.Song.AddedInChan = i.ChannelID
-			songsToEnqueue = append(songsToEnqueue, ev.Song)
+
+			if !firstSongProcessed {
+				firstSongProcessed = true
+				player.Add(ev.Song, immediate)
+
+				if skip {
+					_ = player.Next(ctx, s, i)
+				} else {
+					player.MaybeAutoplayAfterAdd(ctx, s, i)
+				}
+
+				songsToEnqueue = append(songsToEnqueue, ev.Song)
+			} else {
+				songsToEnqueue = append(songsToEnqueue, ev.Song)
+			}
+
 			if infoMsg == "" && ev.Info != "" {
 				infoMsg = ev.Info
 			}
@@ -435,32 +439,28 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		return
 	}
 
-	if shuffleAdd {
-		rand.Shuffle(len(songsToEnqueue), func(i, j int) {
-			songsToEnqueue[i], songsToEnqueue[j] = songsToEnqueue[j], songsToEnqueue[i]
-		})
-	}
-
-	if immediate {
-		for i := len(songsToEnqueue) - 1; i >= 0; i-- {
-			player.Add(songsToEnqueue[i], true)
+	if len(songsToEnqueue) > 1 {
+		remaining := songsToEnqueue[1:]
+		if shuffleAdd {
+			rand.Shuffle(len(remaining), func(i, j int) {
+				remaining[i], remaining[j] = remaining[j], remaining[i]
+			})
 		}
-	} else {
-		for _, song := range songsToEnqueue {
-			player.Add(song, false)
+
+		for _, song := range remaining {
+			// If immediate was requested, the first song is at pos 1,
+			// so we add the rest behind it
+			player.Add(song, immediate)
 		}
 	}
-
-	if skip {
-		_ = player.Next(ctx, s, i)
-	}
-
-	player.MaybeAutoplayAfterAdd(ctx, s, i)
 
 	firstSongTitle := utils.EscapeMd(songsToEnqueue[0].Title)
 	msg := ""
 	if len(songsToEnqueue) > 1 {
 		msg = fmt.Sprintf("Queued **%d** tracks starting with **%s**", len(songsToEnqueue), firstSongTitle)
+		if shuffleAdd {
+			msg += " (rest shuffled)"
+		}
 	} else {
 		msg = fmt.Sprintf("Queued **%s**", firstSongTitle)
 	}

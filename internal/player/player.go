@@ -787,11 +787,8 @@ func (p *Player) stopPlayLocked() {
 }
 
 func (p *Player) scheduleIdleDisconnect() {
-	// Load setting outside lock (can block)
 	set, _ := p.repo.GetSettings(context.Background(), p.guildID)
 	if set == nil || set.SecondsWaitAfterEmpty == 0 {
-		slog.Debug("idle disconnect not configured or disabled",
-			"guildID", p.guildID)
 		return
 	}
 	wait := time.Duration(set.SecondsWaitAfterEmpty) * time.Second
@@ -803,11 +800,13 @@ func (p *Player) scheduleIdleDisconnect() {
 		p.DisconnectTimer.Stop()
 	}
 
-	slog.Info("scheduling idle disconnect",
-		"guildID", p.guildID,
-		"waitSeconds", wait.Seconds())
-
 	p.DisconnectTimer = time.AfterFunc(wait, func() {
+		if p.IsSearching() {
+			slog.Debug("rescheduling idle disconnect: currently searching", "guildID", p.guildID)
+			p.scheduleIdleDisconnect()
+			return
+		}
+
 		p.mu.Lock()
 		vc := p.Conn
 		shouldDisconnect := p.Status == StatusIdle && p.curPlay == nil && vc != nil
@@ -818,15 +817,8 @@ func (p *Player) scheduleIdleDisconnect() {
 		p.mu.Unlock()
 
 		if shouldDisconnect {
-			slog.Info("executing idle disconnect",
-				"guildID", p.guildID)
+			slog.Info("executing idle disconnect", "guildID", p.guildID)
 			_ = p.safeDisconnect(vc)
-		} else {
-			slog.Debug("idle disconnect skipped - conditions not met",
-				"guildID", p.guildID,
-				"status", p.Status,
-				"curPlay", p.curPlay != nil,
-				"vc", vc != nil)
 		}
 	})
 }
