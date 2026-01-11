@@ -34,12 +34,10 @@ dockers_v2:
       - go.mod
       - go.sum
     images:
-      - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}"
       - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}"
     tags:
-      # Always create a tag for the version (e.g., v1.0.0 or v1.0.0-rc1)
       - "{{ .Tag }}"
-      # Only create the "latest" tag if this is NOT a pre-release
       - "{{ if not .Prerelease }}latest{{ end }}"
     platforms:
       - linux/amd64
