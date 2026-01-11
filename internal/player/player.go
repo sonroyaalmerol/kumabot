@@ -1122,18 +1122,13 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 		return
 	}
 
-	p.Status = StatusIdle // Ready to play next
+	p.Status = StatusIdle
 	p.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := p.Play(ctx, nil, nil); err != nil {
+	if err := p.Play(context.Background(), nil, nil); err != nil {
 		slog.Error("failed to play next song after playback end",
 			"guildID", p.guildID,
 			"error", err)
-
-		// Failed to play next, set idle and schedule disconnect
 		p.setIdleState()
 	}
 }
