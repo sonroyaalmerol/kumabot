@@ -13,18 +13,19 @@ release:
   mode: replace
   draft: false
 
-dockers_v2:
+docker_builders:
   - id: kumabot-docker
     dockerfile: Dockerfile
-    image_templates:
+    images:
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:{{ .Tag }}"
       - "ghcr.io/{{ .Runtime.GitHubOrg }}/{{ .ProjectName }}:latest"
       - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:{{ .Tag }}"
       - "docker.io/{{ .Env.DOCKER_USERNAME }}/{{ .ProjectName }}:latest"
-    use: buildx
-    build_flag_templates:
+    
+    flags:
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
     
     platforms:
       - linux/amd64
