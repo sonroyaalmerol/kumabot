@@ -1,4 +1,5 @@
 # Kumabot
+[![](https://img.shields.io/codacy/grade/6a8e207cf98246169e633d6f22da9d9c)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![Docker Stars](https://img.shields.io/docker/stars/sonroyaalmerol/kumabot.svg)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![Docker Pulls](https://img.shields.io/docker/pulls/sonroyaalmerol/kumabot.svg)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![](https://img.shields.io/docker/image-size/sonroyaalmerol/kumabot)](https://img.shields.io/docker/image-size/sonroyaalmerol/kumabot)  [![Release Images](https://github.com/sonroyaalmerol/kumabot/actions/workflows/release.yml/badge.svg)](https://github.com/sonroyaalmerol/kumabot/actions/workflows/release.yml)
 
 Tired of JS-based bots breaking after every minor update (with its `node_modules` dependency hell), or Java-based bots consuming too much memory for a simple utility? Kumabot is built for people who want a "set it and forget it" experience.
 
