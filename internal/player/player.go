@@ -52,6 +52,7 @@ type Player struct {
 	lastVideoID        string
 	urlResolvedAt      time.Time
 	ongoingSearchQueue atomic.Int32
+	lastEmbedMessage   *discordgo.Message
 
 	curPlay *playSession
 }
@@ -376,6 +377,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 	// stop any existing play session
 	p.stopPlayLocked()
+	p.lastEmbedMessage = nil
 
 	// resolve seek/to
 	var seek *int
@@ -484,6 +486,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	// Start sender loop
 	go p.sendLoop(vc, i, cur, pos, sess)
 	go p.sendNowPlayingEmbed()
+	go p.startEmbedUpdater(sess.ctx)
 
 	return nil
 }
@@ -492,19 +495,51 @@ func (p *Player) sendNowPlayingEmbed() {
 	p.mu.Lock()
 	s := p.Session
 	textChanID := p.TextChannelID
+	guildID := p.guildID
+	existingMsg := p.lastEmbedMessage
 	p.mu.Unlock()
 
 	if s == nil || textChanID == "" {
-		slog.Debug("cannot send embed: missing session or text channel",
-			"guildID", p.guildID)
 		return
 	}
 
 	embed := BuildPlayingEmbed(p)
-	if _, err := s.ChannelMessageSendEmbed(textChanID, embed); err != nil {
-		slog.Warn("failed to send now-playing embed",
-			"guildID", p.guildID,
-			"err", err)
+
+	if existingMsg != nil {
+		_, err := s.ChannelMessageEditEmbed(textChanID, existingMsg.ID, embed)
+		if err == nil {
+			return
+		}
+	}
+
+	newMsg, err := s.ChannelMessageSendEmbed(textChanID, embed)
+	if err != nil {
+		slog.Warn("failed to send now-playing embed", "guildID", guildID, "err", err)
+		return
+	}
+
+	p.mu.Lock()
+	p.lastEmbedMessage = newMsg
+	p.mu.Unlock()
+}
+
+func (p *Player) startEmbedUpdater(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.mu.Lock()
+			if p.Status != StatusPlaying {
+				p.mu.Unlock()
+				return
+			}
+			p.mu.Unlock()
+			p.sendNowPlayingEmbed()
+		}
 	}
 }
 
@@ -535,6 +570,7 @@ func (p *Player) Stop() {
 	p.lastResolvedURL = ""
 	p.lastVideoID = ""
 	p.urlResolvedAt = time.Time{}
+	p.lastEmbedMessage = nil
 
 	if p.DisconnectTimer != nil {
 		p.DisconnectTimer.Stop()
