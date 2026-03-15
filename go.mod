@@ -15,7 +15,7 @@ require (
 require (
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/asticode/go-astikit v0.56.0 // indirect
-	github.com/cloudflare/circl v1.6.1 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
@@ -33,4 +33,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/bwmarrin/discordgo => github.com/ozraru/discordgo v0.26.2-0.20251101193404-5cce117199f7
+replace github.com/bwmarrin/discordgo => github.com/yeongaori/discordgo v0.0.0-20260307092356-fd09989565b3
