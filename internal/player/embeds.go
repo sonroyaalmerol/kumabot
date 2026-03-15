@@ -100,7 +100,7 @@ func BuildQueueEmbed(
 	items, _ := p.GetQueuePage(page, pageSize)
 
 	// Build list
-	out := ""
+	var out strings.Builder
 	begin := (page - 1) * pageSize
 	for idx, s := range items {
 		n := begin + idx + 1
@@ -108,7 +108,7 @@ func BuildQueueEmbed(
 		if !s.IsLive {
 			dur = utils.PrettyTime(s.Length)
 		}
-		out += fmt.Sprintf("`%d.` %s `[ %s ]`\n", n, songLink(s), dur)
+		out.WriteString(fmt.Sprintf("`%d.` %s `[ %s ]`\n", n, songLink(s), dur))
 	}
 
 	totalLen := 0
@@ -154,13 +154,10 @@ func BuildQueueEmbed(
 		desc += upNextHeader
 
 		// Budget remaining for the queue lines
-		remaining := maxDesc - len(desc)
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := max(maxDesc-len(desc), 0)
 
 		// Append as many lines as fit
-		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
 		built := &strings.Builder{}
 		consumed := 0
 		shown := 0

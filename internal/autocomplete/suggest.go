@@ -49,7 +49,7 @@ func GetYouTubeAndSpotifySuggestions(ctx context.Context, query string, sp *spot
 
 	out := make([]*discordgo.ApplicationCommandOptionChoice, 0, limit)
 	yts := min(len(yt), limit)
-	for i := 0; i < yts; i++ {
+	for i := range yts {
 		out = append(out, &discordgo.ApplicationCommandOptionChoice{
 			Name:  "YouTube: " + yt[i],
 			Value: yt[i],
@@ -99,11 +99,4 @@ func GetYouTubeAndSpotifySuggestions(ctx context.Context, query string, sp *spot
 		out = out[:limit]
 	}
 	return out, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

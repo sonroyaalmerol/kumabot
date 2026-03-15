@@ -466,10 +466,7 @@ func (s *PCMStreamer) reopenAndSeek() error {
 
 	// Seek with safety margin
 	const safetyMarginSamples = 4800
-	safeSeekTarget := targetPTS - safetyMarginSamples
-	if safeSeekTarget < 0 {
-		safeSeekTarget = 0
-	}
+	safeSeekTarget := max(targetPTS-safetyMarginSamples, 0)
 
 	ts := astiav.RescaleQ(safeSeekTarget, astiav.NewRational(1, 48000), s.timeBase)
 	if err := s.fc.SeekFrame(s.audioStream.Index(), ts, astiav.NewSeekFlags(astiav.SeekFlagBackward)); err != nil {
@@ -669,7 +666,7 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		}
 		// Gather plane byte slices
 		planes := make([][]byte, ch)
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			pb, err := s.dstFrame.Data().Bytes(c)
 			if err != nil {
 				return fmt.Errorf("dst plane%d bytes: %w", c, err)
@@ -682,8 +679,8 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 		// Interleave sample-by-sample, channel order as provided
 		// sample index i: for each channel c, append 2 bytes
 		outOff := 0
-		for i := 0; i < nb; i++ {
-			for c := 0; c < ch; c++ {
+		for i := range nb {
+			for c := range ch {
 				src := planes[c][i*bytesPerSample : i*bytesPerSample+bytesPerSample]
 				copy(interleaved[outOff:outOff+bytesPerSample], src)
 				outOff += bytesPerSample
@@ -826,7 +823,7 @@ func (s *PCMStreamer) flushSWR() error {
 				return fmt.Errorf("flush unexpected planar format: %s", s.dstFrame.SampleFormat().String())
 			}
 			planes := make([][]byte, ch)
-			for c := 0; c < ch; c++ {
+			for c := range ch {
 				pb, err := s.dstFrame.Data().Bytes(c)
 				if err != nil {
 					return err
@@ -837,8 +834,8 @@ func (s *PCMStreamer) flushSWR() error {
 				planes[c] = pb
 			}
 			outOff := 0
-			for i := 0; i < nb; i++ {
-				for c := 0; c < ch; c++ {
+			for i := range nb {
+				for c := range ch {
 					src := planes[c][i*bytesPerSample : i*bytesPerSample+bytesPerSample]
 					copy(interleaved[outOff:outOff+bytesPerSample], src)
 					outOff += bytesPerSample

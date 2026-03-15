@@ -15,7 +15,7 @@ func ProgressBar(width int, progress float64) string {
 		dot = width - 1
 	}
 	out := make([]rune, 0, width*2)
-	for i := 0; i < width; i++ {
+	for i := range width {
 		if i == dot {
 			out = append(out, '🔘')
 		} else {

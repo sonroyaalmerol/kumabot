@@ -935,10 +935,7 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 		if o.Name == "page" {
 			page = int(o.IntValue())
 		} else if o.Name == "page-size" {
-			pageSize = int(o.IntValue())
-			if pageSize < 1 {
-				pageSize = 1
-			}
+			pageSize = max(int(o.IntValue()), 1)
 			if pageSize > 30 {
 				pageSize = 30
 			}

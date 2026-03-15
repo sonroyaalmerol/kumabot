@@ -129,10 +129,10 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID
 
 	if old != nil {
 		_ = old.Speaking(false)
-		_ = old.Disconnect(context.Background())
+		_ = old.Disconnect()
 	}
 
-	vc, err := s.ChannelVoiceJoin(context.Background(), guildID, channelID, false, true)
+	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 	if err != nil {
 		return err
 	}
@@ -195,11 +195,7 @@ func (p *Player) safeDisconnect(vc *discordgo.VoiceConnection) error {
 	// Small delay to let pending operations complete
 	time.Sleep(150 * time.Millisecond)
 
-	// Disconnect with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	return vc.Disconnect(ctx)
+	return vc.Disconnect()
 }
 
 func (p *Player) Disconnect() {
@@ -239,10 +235,7 @@ func (p *Player) Add(song SongMetadata, immediate bool) {
 		return
 	}
 
-	insertAt := p.Qpos + 1
-	if insertAt < 0 {
-		insertAt = 0
-	}
+	insertAt := max(p.Qpos+1, 0)
 	if insertAt > len(p.SongQueue) {
 		insertAt = len(p.SongQueue)
 	}
@@ -306,10 +299,7 @@ func (p *Player) GetQueuePage(page, pageSize int) ([]SongMetadata, int) {
 		return []SongMetadata{}, total
 	}
 
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
+	end := min(start+pageSize, total)
 
 	out := make([]SongMetadata, end-start)
 	copy(out, visible[start:end])
