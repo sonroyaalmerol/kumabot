@@ -1,9 +1,12 @@
-# --- Stage 1: build Go app against Debian Trixie FFmpeg (7.1) ---
+# --- Stage 1: build Go app against Debian Sid FFmpeg (8.0) ---
 FROM golang:1.26-trixie AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Add Debian Sid for FFmpeg 8.0 (required by go-astiav v0.40.0+)
+RUN echo 'deb http://deb.debian.org/debian sid main' > /etc/apt/sources.list.d/sid.list && \
+  apt-get update && apt-get install -y --no-install-recommends \
+  -t sid \
   pkg-config \
   libavdevice-dev \
   libavcodec-dev \
@@ -29,19 +32,19 @@ ENV CGO_ENABLED=1
 RUN go build -ldflags "-s -w" -o /out/kumabot ./cmd/kumabot
 
 
-# --- Stage 2: runtime with Trixie FFmpeg libs (no manual LD paths) ---
-FROM debian:trixie-slim
+# --- Stage 2: runtime with Sid FFmpeg 8.0 libs ---
+FROM debian:sid-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   tzdata \
-  libavcodec61 \
-  libavformat61 \
-  libavutil59 \
-  libswresample5 \
-  libswscale8 \
-  libavfilter10 \
-  libavdevice61 \
+  libavcodec62 \
+  libavformat62 \
+  libavutil60 \
+  libswresample6 \
+  libswscale9 \
+  libavfilter11 \
+  libavdevice62 \
   libopus0 \
   && rm -rf /var/lib/apt/lists/*
 
