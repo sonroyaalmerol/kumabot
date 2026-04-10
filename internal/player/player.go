@@ -47,6 +47,11 @@ type Player struct {
 	DisconnectTimer *time.Timer
 	LastURL         string
 
+	// Radio feature state
+	RadioMode        bool     // Whether radio is enabled
+	RadioQueuedIndex int      // Position of radio-suggested song in queue, -1 if none
+	RadioHistory     []string // History of video IDs played by radio to avoid repeats
+
 	requestedSeek      *int
 	lastResolvedURL    string
 	lastVideoID        string
@@ -71,12 +76,14 @@ type playSession struct {
 
 func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, guildID string) *Player {
 	return &Player{
-		cfg:        cfg,
-		repo:       repo,
-		cache:      cache,
-		guildID:    guildID,
-		Status:     StatusIdle,
-		DefaultVol: DefaultVolume,
+		cfg:              cfg,
+		repo:             repo,
+		cache:            cache,
+		guildID:          guildID,
+		Status:           StatusIdle,
+		DefaultVol:       DefaultVolume,
+		RadioQueuedIndex: -1,
+		RadioHistory:     make([]string, 0),
 	}
 }
 
