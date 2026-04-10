@@ -11,11 +11,17 @@ import (
 )
 
 const (
-	maxRadioHistory = 50 // Keep track of last 50 songs to avoid repeats
+	maxRadioHistory    = 50
+	maxSameArtistCount = 3
 )
 
+type radioHistoryEntry struct {
+	VideoID string
+	Artist  string
+}
+
 // FindRelatedSong finds a song related to the given song using YouTube search.
-// It avoids songs with the same title/artist and maintains variety.
+// It avoids songs with similar titles and maintains variety across artists.
 func (p *Player) FindRelatedSong(ctx context.Context, current SongMetadata) (*SongMetadata, error) {
 	searchQueries := p.buildSearchQueries(current)
 
@@ -136,37 +142,44 @@ func (p *Player) searchYouTube(ctx context.Context, query string) ([]*SongMetada
 // 2. Songs in the radio history (to avoid repeats)
 // 3. Live streams (optional, but usually better for radio)
 func (p *Player) isSuitableRadioChoice(candidate *SongMetadata, current SongMetadata) bool {
-	// Skip live streams for radio
 	if candidate.IsLive {
 		return false
 	}
 
-	// Normalize strings for comparison
 	candTitle := strings.ToLower(strings.TrimSpace(candidate.Title))
 	currTitle := strings.ToLower(strings.TrimSpace(current.Title))
 	candArtist := strings.ToLower(strings.TrimSpace(candidate.Artist))
-	currArtist := strings.ToLower(strings.TrimSpace(current.Artist))
 
-	// Check if same song (same title AND artist)
-	if areSimilar(candTitle, currTitle) && areSimilar(candArtist, currArtist) {
-		slog.Debug("radio: skipping same song", "title", candidate.Title, "artist", candidate.Artist)
+	if areSimilar(candTitle, currTitle) {
+		slog.Debug("radio: skipping similar title", "title", candidate.Title)
 		return false
 	}
 
-	// Check history to avoid repeats
-	for _, historyID := range p.RadioHistory {
-		if candidate.VideoID == historyID {
+	for _, entry := range p.RadioHistory {
+		if candidate.VideoID == entry.VideoID {
 			slog.Debug("radio: skipping recently played", "title", candidate.Title)
 			return false
 		}
+	}
+
+	sameArtistCount := 0
+	for _, entry := range p.RadioHistory {
+		if areSimilar(candArtist, strings.ToLower(strings.TrimSpace(entry.Artist))) {
+			sameArtistCount++
+		}
+	}
+
+	if sameArtistCount >= maxSameArtistCount {
+		slog.Debug("radio: skipping same artist cap reached", "artist", candidate.Artist, "count", sameArtistCount)
+		return false
 	}
 
 	return true
 }
 
 // addToRadioHistory adds a video ID to the radio history, maintaining max size
-func (p *Player) addToRadioHistory(videoID string) {
-	p.RadioHistory = append(p.RadioHistory, videoID)
+func (p *Player) addToRadioHistory(videoID string, artist string) {
+	p.RadioHistory = append(p.RadioHistory, radioHistoryEntry{VideoID: videoID, Artist: artist})
 	if len(p.RadioHistory) > maxRadioHistory {
 		p.RadioHistory = p.RadioHistory[len(p.RadioHistory)-maxRadioHistory:]
 	}

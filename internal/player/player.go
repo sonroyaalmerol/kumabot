@@ -48,9 +48,9 @@ type Player struct {
 	LastURL         string
 
 	// Radio feature state
-	RadioMode        bool     // Whether radio is enabled
-	RadioQueuedIndex int      // Position of radio-suggested song in queue, -1 if none
-	RadioHistory     []string // History of video IDs played by radio to avoid repeats
+	RadioMode        bool                // Whether radio is enabled
+	RadioQueuedIndex int                 // Position of radio-suggested song in queue, -1 if none
+	RadioHistory     []radioHistoryEntry // History of songs played by radio to avoid repeats
 
 	requestedSeek      *int
 	lastResolvedURL    string
@@ -83,7 +83,7 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 		Status:           StatusIdle,
 		DefaultVol:       DefaultVolume,
 		RadioQueuedIndex: -1,
-		RadioHistory:     make([]string, 0),
+		RadioHistory:     make([]radioHistoryEntry, 0),
 	}
 }
 
@@ -1271,7 +1271,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 		return
 	}
 
-	p.addToRadioHistory(related.VideoID)
+	p.addToRadioHistory(related.VideoID, related.Artist)
 	p.SongQueue = append(p.SongQueue, *related)
 	p.RadioQueuedIndex = len(p.SongQueue) - 1
 
