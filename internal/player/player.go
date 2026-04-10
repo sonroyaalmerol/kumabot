@@ -616,7 +616,21 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 	p.stopPlayLocked()
 
 	if p.Qpos+n >= len(p.SongQueue) {
-		// Queue empty after skip
+		// Queue empty after skip — if radio is on, search for a related song
+		if p.RadioMode && p.NowPlaying != nil {
+			p.Qpos = len(p.SongQueue)
+			p.cancelIdleDisconnectLocked()
+			p.lastResolvedURL = ""
+			p.lastVideoID = ""
+			p.urlResolvedAt = time.Time{}
+			p.mu.Unlock()
+
+			slog.Info("forward skipped past queue end, triggering radio",
+				"guildID", p.guildID)
+			go p.tryQueueRadioSong(true)
+			return nil
+		}
+
 		shouldSchedule := p.setIdleStateLocked()
 
 		p.lastResolvedURL = ""
