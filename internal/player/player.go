@@ -51,6 +51,7 @@ type Player struct {
 	RadioMode        bool                // Whether radio is enabled
 	RadioQueuedIndex int                 // Position of radio-suggested song in queue, -1 if none
 	RadioHistory     []radioHistoryEntry // History of songs played by radio to avoid repeats
+	radioSearchDone  chan struct{}       // closed when background radio search completes
 
 	requestedSeek      *int
 	lastResolvedURL    string
@@ -213,6 +214,8 @@ func (p *Player) Disconnect() {
 	p.Status = StatusIdle
 	p.NowPlaying = nil
 	p.PositionSec = 0
+	p.RadioQueuedIndex = -1
+	p.radioSearchDone = nil
 
 	p.lastResolvedURL = ""
 	p.lastVideoID = ""
@@ -583,6 +586,7 @@ func (p *Player) Stop() {
 	p.NowPlaying = nil
 	p.PositionSec = 0
 	p.RadioQueuedIndex = -1
+	p.radioSearchDone = nil
 
 	p.lastResolvedURL = ""
 	p.lastVideoID = ""
@@ -784,19 +788,34 @@ func (p *Player) TryStartRadio() {
 }
 
 // maybeQueueRadio checks if we should pre-queue a radio song and does so in the background.
-// Call this when starting playback of a song.
+// Call this when starting playback of a song. The search runs in a goroutine and
+// radioSearchDone is closed when it finishes, so handlePlaybackEnd can wait for it.
 func (p *Player) maybeQueueRadio() {
 	p.mu.Lock()
 	shouldQueue := p.RadioMode &&
 		p.NowPlaying != nil &&
 		p.Qpos >= 0 &&
-		p.Qpos == len(p.SongQueue)-1 && // This is the last song in queue
-		p.RadioQueuedIndex < 0 // No radio song already queued
+		p.Qpos == len(p.SongQueue)-1 &&
+		p.RadioQueuedIndex < 0 &&
+		p.radioSearchDone == nil
 	p.mu.Unlock()
 
-	if shouldQueue {
-		go p.tryQueueRadioSong(false)
+	if !shouldQueue {
+		return
 	}
+
+	ch := make(chan struct{})
+	p.mu.Lock()
+	p.radioSearchDone = ch
+	p.mu.Unlock()
+
+	go func() {
+		defer close(ch)
+		p.tryQueueRadioSong(false)
+		p.mu.Lock()
+		p.radioSearchDone = nil
+		p.mu.Unlock()
+	}()
 }
 
 // Move moves an item in the queue (1-based positions for the queue after current song)
@@ -1209,6 +1228,21 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 		hasNext = p.Qpos < len(p.SongQueue)
 	}
 
+	// If no next song, wait for any in-flight background radio search before giving up.
+	// This eliminates the gap between songs when radio pre-queued while the last song was playing.
+	if !hasNext && p.RadioMode && p.NowPlaying != nil {
+		ch := p.radioSearchDone
+		p.mu.Unlock()
+		if ch != nil {
+			select {
+			case <-ch:
+			case <-time.After(15 * time.Second):
+			}
+		}
+		p.mu.Lock()
+		hasNext = p.Qpos < len(p.SongQueue)
+	}
+
 	if !hasNext {
 		if p.RadioMode && p.NowPlaying != nil {
 			p.mu.Unlock()
@@ -1271,7 +1305,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 		return
 	}
 
-	p.addToRadioHistory(related.VideoID, related.Artist)
+	p.addToRadioHistory(related.VideoID, related.Title, related.Artist)
 	p.SongQueue = append(p.SongQueue, *related)
 	p.RadioQueuedIndex = len(p.SongQueue) - 1
 

@@ -5,27 +5,268 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/sonroyaalmerol/kumabot/internal/stream"
 )
 
 const (
-	maxRadioHistory    = 50
-	maxSameArtistCount = 3
+	maxRadioHistory           = 50
+	maxSameArtistCount        = 3
+	titleSimilarityThreshold  = 0.65
+	artistSimilarityThreshold = 0.7
 )
 
 type radioHistoryEntry struct {
 	VideoID string
+	Title   string
 	Artist  string
 }
 
+// ---------- canonical parsing ----------
+
+var (
+	reParens        = regexp.MustCompile(`\([^)]*\)`)
+	reBrackets      = regexp.MustCompile(`\[[^\]]*\]`)
+	reFeat          = regexp.MustCompile(`(?i)\s+(?:feat\.?|ft\.?|featuring)\s+.*`)
+	reArtistSep     = regexp.MustCompile(`(?i)\s*(?:,\s*|\s+[&xXvV][sS]?\s+|\s+and\s+)\s*`)
+	reDashSep       = regexp.MustCompile(`\s*[-–—]\s*`)
+	reYouTubeNoise  = regexp.MustCompile(`(?i)\b(?:official\s+(?:music\s+)?video|music\s+video|official\s+audio|lyric\s+video|lyrics|audio\s+only|full\s+song|hd|4k|1080p|720p|hq|high\s+quality|remastered|remaster|deluxe|explicit|clean\s+version|radio\s+edit|extended|bonus\s+track)\b`)
+	reUploaderNoise = regexp.MustCompile(`(?i)\s*[-–—]\s*(?:topic|vevo|official|music|records|recordings|entertainment|tv|net)\s*$`)
+	reThePrefix     = regexp.MustCompile(`(?i)^the\s+`)
+	reNonAlphaNum   = regexp.MustCompile(`[^a-z0-9\s]`)
+	reMultiSpace    = regexp.MustCompile(`\s+`)
+)
+
+// canonicalTitle extracts the core song name from a raw YouTube title.
+//
+// Input:  "Adele - Hello (Official Music Video)"
+// Output: "hello"
+//
+// Input:  "Queen – Bohemian Rhapsody (Lyrics)"
+// Output: "bohemian rhapsody"
+//
+// Input:  "Smells Like Teen Spirit (Remix)"
+// Output: "smells like teen spirit"
+func canonicalTitle(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+
+	// If title contains " - " / " – " / " — ", take the part after it (the song name)
+	if parts := reDashSep.Split(s, 2); len(parts) == 2 {
+		candidate := strings.TrimSpace(parts[1])
+		if len(candidate) >= 2 {
+			s = candidate
+		}
+	}
+
+	// Strip feat/ft clauses (e.g., "Song Title feat. Other Artist")
+	s = reFeat.ReplaceAllString(s, "")
+
+	// Strip parenthetical content: (Official Video), (Remix), (Live), (Deluxe), etc.
+	s = reParens.ReplaceAllString(s, "")
+	// Strip bracket content: [Official Video], [Lyrics], etc.
+	s = reBrackets.ReplaceAllString(s, "")
+
+	// Strip known YouTube noise phrases
+	s = reYouTubeNoise.ReplaceAllString(s, "")
+
+	return clean(s)
+}
+
+// canonicalArtist extracts the core artist name from a raw YouTube uploader string.
+//
+// Input:  "Adele - Topic"
+// Output: "adele"
+//
+// Input:  "QueenOfficial"
+// Output: "queenofficial"
+//
+// Input:  "Artist1 & Artist2"
+// Output: ["artist1", "artist2"]
+func canonicalArtist(raw string) []string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+
+	// Strip YouTube uploader noise: "- Topic", "- VEVO", "Official", etc.
+	s = reUploaderNoise.ReplaceAllString(s, "")
+
+	// Strip parenthetical and bracket noise
+	s = reParens.ReplaceAllString(s, "")
+	s = reBrackets.ReplaceAllString(s, "")
+
+	// Split on collaboration markers: "&", ",", " x ", " and ", "feat."
+	// First strip feat clauses
+	s = reFeat.ReplaceAllString(s, "")
+
+	parts := reArtistSep.Split(s, -1)
+	var artists []string
+	for _, p := range parts {
+		cleaned := clean(p)
+		if cleaned != "" {
+			artists = append(artists, cleaned)
+		}
+	}
+	return artists
+}
+
+// clean normalizes a string: removes non-alphanumerics, collapses whitespace.
+func clean(s string) string {
+	s = strings.ToLower(s)
+	s = reNonAlphaNum.ReplaceAllString(s, " ")
+	s = reMultiSpace.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
+// stripThe removes leading "the " from a string for comparison.
+func stripThe(s string) string {
+	return reThePrefix.ReplaceAllString(s, "")
+}
+
+// ---------- similarity metrics ----------
+
+// tokenize splits a string into word tokens.
+func tokenize(s string) []string {
+	fields := strings.Fields(s)
+	seen := make(map[string]bool, len(fields))
+	var uniq []string
+	for _, f := range fields {
+		if !seen[f] {
+			seen[f] = true
+			uniq = append(uniq, f)
+		}
+	}
+	return uniq
+}
+
+// jaccardSimilarity computes the Jaccard index of two token sets.
+// Returns a value in [0, 1].
+func jaccardSimilarity(a, b string) float64 {
+	ta := tokenize(a)
+	tb := tokenize(b)
+	if len(ta) == 0 && len(tb) == 0 {
+		return 1.0
+	}
+	if len(ta) == 0 || len(tb) == 0 {
+		return 0.0
+	}
+
+	setA := make(map[string]bool, len(ta))
+	for _, t := range ta {
+		setA[t] = true
+	}
+
+	intersection := 0
+	for _, t := range tb {
+		if setA[t] {
+			intersection++
+		}
+	}
+
+	union := len(ta) + len(tb) - intersection
+	if union == 0 {
+		return 0.0
+	}
+	return float64(intersection) / float64(union)
+}
+
+// isSameTitle determines if two raw YouTube titles refer to the same song.
+// It handles covers, remixes, live versions, lyric videos, etc.
+func isSameTitle(rawA, rawB string) bool {
+	a := canonicalTitle(rawA)
+	b := canonicalTitle(rawB)
+
+	if a == b {
+		return true
+	}
+
+	// Check containment for short vs long titles
+	if len(a) > 0 && len(b) > 0 {
+		if strings.Contains(a, b) || strings.Contains(b, a) {
+			longer := a
+			if len(b) > len(a) {
+				longer = b
+			}
+			shorter := b
+			if len(a) < len(b) {
+				shorter = a
+			}
+			// Only accept containment if the shorter string is substantial
+			if len(tokenize(shorter)) >= 2 && float64(len(shorter))/float64(len(longer)) > 0.5 {
+				return true
+			}
+		}
+	}
+
+	return jaccardSimilarity(a, b) >= titleSimilarityThreshold
+}
+
+// isSameArtist determines if two raw YouTube uploader names refer to the same artist.
+// Handles "The Beatles" vs "Beatles", "Adele - Topic" vs "Adele", collaborations, etc.
+func isSameArtist(rawA, rawB string) bool {
+	artistsA := canonicalArtist(rawA)
+	artistsB := canonicalArtist(rawB)
+
+	for _, a := range artistsA {
+		for _, b := range artistsB {
+			if artistTokensMatch(a, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// artistTokensMatch checks if two canonical artist strings match.
+func artistTokensMatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+
+	// Handle "the beatles" vs "beatles"
+	aNoThe := stripThe(a)
+	bNoThe := stripThe(b)
+	if aNoThe == bNoThe {
+		return true
+	}
+
+	// Handle "rolling stones" vs "the rolling stones" — one is subset
+	if aNoThe != "" && bNoThe != "" {
+		if strings.Contains(aNoThe, bNoThe) || strings.Contains(bNoThe, aNoThe) {
+			return true
+		}
+	}
+
+	return jaccardSimilarity(aNoThe, bNoThe) >= artistSimilarityThreshold
+}
+
+// ---------- stop words for title token filtering ----------
+
+var titleStopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "of": true, "in": true,
+	"on": true, "at": true, "to": true, "for": true, "and": true,
+	"but": true, "or": true, "is": true, "it": true, "by": true,
+}
+
+// extractTitleCore gets meaningful tokens from a title for search queries.
+func extractTitleCore(raw string) string {
+	ct := canonicalTitle(raw)
+	tokens := tokenize(ct)
+	var filtered []string
+	for _, t := range tokens {
+		if !titleStopWords[t] {
+			filtered = append(filtered, t)
+		}
+	}
+	return strings.Join(filtered, " ")
+}
+
+// ---------- main radio logic ----------
+
 // FindRelatedSong finds a song related to the given song using YouTube search.
-// It avoids songs with similar titles and maintains variety across artists.
 func (p *Player) FindRelatedSong(ctx context.Context, current SongMetadata) (*SongMetadata, error) {
 	searchQueries := p.buildSearchQueries(current)
 
-	// Try each search query until we find a suitable song
 	for _, query := range searchQueries {
 		slog.Debug("radio search query", "query", query, "guildID", p.guildID)
 
@@ -35,7 +276,6 @@ func (p *Player) FindRelatedSong(ctx context.Context, current SongMetadata) (*So
 			continue
 		}
 
-		// Find a suitable result that isn't a duplicate
 		for _, result := range results {
 			if p.isSuitableRadioChoice(result, current) {
 				return result, nil
@@ -46,46 +286,54 @@ func (p *Player) FindRelatedSong(ctx context.Context, current SongMetadata) (*So
 	return nil, fmt.Errorf("could not find a suitable related song")
 }
 
-// buildSearchQueries creates a variety of search queries to find related content.
-// This mimics YouTube's radio behavior by mixing different strategies.
+// buildSearchQueries creates varied search queries for related content.
 func (p *Player) buildSearchQueries(current SongMetadata) []string {
 	queries := make([]string, 0)
 
-	// Strategy 1: Mix of title keywords and genre/similar artists
-	// Extract key terms from title (remove common suffixes like "official video")
-	titleKeywords := extractKeywords(current.Title)
+	titleCore := extractTitleCore(current.Title)
+	artists := canonicalArtist(current.Artist)
+	artistStr := ""
+	if len(artists) > 0 {
+		artistStr = artists[0]
+	}
 
-	// Strategy 2: Artist + "related" or similar terms
-	if current.Artist != "" {
+	// Strategy 1: Artist + genre-like queries for discovery
+	if artistStr != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s music", current.Artist),
-			fmt.Sprintf("ytsearch5:%s similar artists", current.Artist),
+			fmt.Sprintf("ytsearch5:%s similar songs", artistStr),
+			fmt.Sprintf("ytsearch5:songs like %s", artistStr),
 		)
 	}
 
-	// Strategy 3: Title keywords with "music" or "song"
-	if titleKeywords != "" {
+	// Strategy 2: Title keywords for genre/mood matching
+	if titleCore != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s music", titleKeywords),
-			fmt.Sprintf("ytsearch5:%s song", titleKeywords),
+			fmt.Sprintf("ytsearch5:songs like %s", titleCore),
 		)
 	}
 
-	// Strategy 4: Mix title keywords without artist for variety
-	if titleKeywords != "" && current.Artist != "" {
+	// Strategy 3: Artist + title mix for very close matches
+	if artistStr != "" && titleCore != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s mix", titleKeywords),
-			fmt.Sprintf("ytsearch5:similar to %s", titleKeywords),
+			fmt.Sprintf("ytsearch5:%s %s", artistStr, titleCore),
 		)
 	}
 
-	// Strategy 5: Genre-based if we can infer it (broad searches for variety)
-	queries = append(queries,
-		"ytsearch5:music",
-		"ytsearch5:popular songs",
-	)
+	// Strategy 4: Second artist from collaboration
+	if len(artists) > 1 {
+		queries = append(queries,
+			fmt.Sprintf("ytsearch5:%s music", artists[1]),
+		)
+	}
 
-	// Shuffle the queries so we don't always try the same order
+	// Strategy 5: Broad discovery
+	if artistStr != "" {
+		queries = append(queries,
+			fmt.Sprintf("ytsearch5:%s", artistStr),
+		)
+	}
+
+	// Shuffle for variety
 	rand.Shuffle(len(queries), func(i, j int) {
 		queries[i], queries[j] = queries[j], queries[i]
 	})
@@ -93,7 +341,7 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 	return queries
 }
 
-// searchYouTube performs a YouTube search and returns results as SongMetadata
+// searchYouTube performs a YouTube search and returns results as SongMetadata.
 func (p *Player) searchYouTube(ctx context.Context, query string) ([]*SongMetadata, error) {
 	info, err := stream.YtdlpGetInfo(ctx, p.cfg, query)
 	if err != nil {
@@ -102,7 +350,6 @@ func (p *Player) searchYouTube(ctx context.Context, query string) ([]*SongMetada
 
 	var results []*SongMetadata
 
-	// If we got entries from a playlist/search
 	if len(info.Entries) > 0 {
 		for _, entry := range info.Entries {
 			if entry.Id == "" {
@@ -120,7 +367,6 @@ func (p *Player) searchYouTube(ctx context.Context, query string) ([]*SongMetada
 			})
 		}
 	} else if info.Id != "" {
-		// Single result
 		results = append(results, &SongMetadata{
 			Title:     info.Title,
 			Artist:    info.Uploader,
@@ -137,116 +383,86 @@ func (p *Player) searchYouTube(ctx context.Context, query string) ([]*SongMetada
 }
 
 // isSuitableRadioChoice checks if a song is suitable for radio play.
-// It avoids:
-// 1. Same title/artist as current song
-// 2. Songs in the radio history (to avoid repeats)
-// 3. Live streams (optional, but usually better for radio)
 func (p *Player) isSuitableRadioChoice(candidate *SongMetadata, current SongMetadata) bool {
 	if candidate.IsLive {
 		return false
 	}
 
-	candTitle := strings.ToLower(strings.TrimSpace(candidate.Title))
-	currTitle := strings.ToLower(strings.TrimSpace(current.Title))
-	candArtist := strings.ToLower(strings.TrimSpace(candidate.Artist))
-
-	if areSimilar(candTitle, currTitle) {
-		slog.Debug("radio: skipping similar title", "title", candidate.Title)
+	// Reject same/similar title regardless of artist (catches covers, remixes, lyric videos)
+	if isSameTitle(candidate.Title, current.Title) {
+		slog.Debug("radio: skipping similar title",
+			"candidate", candidate.Title,
+			"current", current.Title,
+			"guildID", p.guildID)
 		return false
 	}
 
+	// Reject exact video ID repeats from history
 	for _, entry := range p.RadioHistory {
 		if candidate.VideoID == entry.VideoID {
-			slog.Debug("radio: skipping recently played", "title", candidate.Title)
+			slog.Debug("radio: skipping recently played", "title", candidate.Title, "guildID", p.guildID)
 			return false
 		}
 	}
 
+	// Reject if same title appeared in history (covers of previously played songs)
+	for _, entry := range p.RadioHistory {
+		if isSameTitle(candidate.Title, entry.Title) {
+			slog.Debug("radio: skipping title from history",
+				"candidate", candidate.Title,
+				"guildID", p.guildID)
+			return false
+		}
+	}
+
+	// Cap same-artist songs in history to prevent discography runs
 	sameArtistCount := 0
 	for _, entry := range p.RadioHistory {
-		if areSimilar(candArtist, strings.ToLower(strings.TrimSpace(entry.Artist))) {
+		if isSameArtist(candidate.Artist, entry.Artist) {
 			sameArtistCount++
 		}
 	}
 
 	if sameArtistCount >= maxSameArtistCount {
-		slog.Debug("radio: skipping same artist cap reached", "artist", candidate.Artist, "count", sameArtistCount)
+		slog.Debug("radio: skipping artist cap reached",
+			"artist", candidate.Artist,
+			"count", sameArtistCount,
+			"guildID", p.guildID)
 		return false
 	}
 
 	return true
 }
 
-// addToRadioHistory adds a video ID to the radio history, maintaining max size
-func (p *Player) addToRadioHistory(videoID string, artist string) {
-	p.RadioHistory = append(p.RadioHistory, radioHistoryEntry{VideoID: videoID, Artist: artist})
+func (p *Player) addToRadioHistory(videoID string, title string, artist string) {
+	p.RadioHistory = append(p.RadioHistory, radioHistoryEntry{VideoID: videoID, Title: title, Artist: artist})
 	if len(p.RadioHistory) > maxRadioHistory {
 		p.RadioHistory = p.RadioHistory[len(p.RadioHistory)-maxRadioHistory:]
 	}
 }
 
-// areSimilar checks if two strings are similar (for deduplication)
-func areSimilar(a, b string) bool {
-	// Direct match
-	if a == b {
-		return true
-	}
-
-	// Check if one contains the other
-	if strings.Contains(a, b) || strings.Contains(b, a) {
-		return true
-	}
-
-	// Normalize common variations (remove "official video", "lyrics", etc.)
-	normalize := func(s string) string {
-		s = strings.ReplaceAll(s, "official video", "")
-		s = strings.ReplaceAll(s, "official music video", "")
-		s = strings.ReplaceAll(s, "lyrics", "")
-		s = strings.ReplaceAll(s, "lyric video", "")
-		s = strings.ReplaceAll(s, "audio", "")
-		s = strings.ReplaceAll(s, "(", "")
-		s = strings.ReplaceAll(s, ")", "")
-		s = strings.ReplaceAll(s, "[", "")
-		s = strings.ReplaceAll(s, "]", "")
-		s = strings.TrimSpace(s)
-		return s
-	}
-
-	return normalize(a) == normalize(b)
-}
-
-// extractKeywords extracts key terms from a title, removing common suffixes
-func extractKeywords(title string) string {
-	// Remove common suffixes and annotations
-	clean := strings.ToLower(title)
-
-	// Remove common video type annotations
-	removals := []string{
-		"official video", "official music video",
-		"lyrics", "lyric video",
-		"audio", "official audio",
-		"hd", "4k", "1080p", "720p",
-		"(", ")", "[", "]",
-	}
-
-	for _, r := range removals {
-		clean = strings.ReplaceAll(clean, r, "")
-	}
-
-	// Trim and return first few meaningful words (max 5)
-	words := strings.Fields(clean)
-	if len(words) > 5 {
-		words = words[:5]
-	}
-
-	return strings.TrimSpace(strings.Join(words, " "))
-}
-
-// extractThumbnail gets the best thumbnail URL from the list
 func extractThumbnail(thumbnails []stream.YTDLPThumbnail) string {
 	if len(thumbnails) == 0 {
 		return ""
 	}
-	// Return the last one (usually highest quality)
 	return thumbnails[len(thumbnails)-1].Url
+}
+
+// isSeparator reports whether a rune is a dash-like separator used in YouTube titles.
+func isSeparator(r rune) bool {
+	return r == '-' || r == '–' || r == '—' || r == '|' || r == '/'
+}
+
+// normalizeRunes lowercases and strips diacritics-like noise for token comparison.
+func normalizeRunes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+		} else if unicode.IsSpace(r) || isSeparator(r) {
+			b.WriteRune(' ')
+		}
+	}
+	return b.String()
 }
