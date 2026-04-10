@@ -67,26 +67,38 @@ func canonicalTitleParts(raw string) []string {
 	// Strip known YouTube noise phrases
 	s = reYouTubeNoise.ReplaceAllString(s, "")
 
-	s = clean(s)
-
+	// Split on dash BEFORE clean() — clean() replaces dashes with spaces
 	parts := reDashSep.Split(s, 2)
 	if len(parts) == 2 {
-		left := strings.TrimSpace(parts[0])
-		right := strings.TrimSpace(parts[1])
+		left := clean(parts[0])
+		right := clean(parts[1])
 		if left != "" && right != "" {
 			return []string{left, right, left + " " + right}
 		}
 	}
 
-	return []string{s}
+	return []string{clean(s)}
 }
 
 // canonicalTitle extracts the core song name from a raw YouTube title.
+// Splits on dash first, then strips noise — preserves original behavior for search queries.
 func canonicalTitle(raw string) string {
-	parts := canonicalTitleParts(raw)
-	// For backward compatibility, return the first part (which is either the full title
-	// or the left side of the dash)
-	return parts[0]
+	s := strings.ToLower(strings.TrimSpace(raw))
+
+	// Split on dash first, take the part after it (the song name)
+	if parts := reDashSep.Split(s, 2); len(parts) == 2 {
+		candidate := strings.TrimSpace(parts[1])
+		if len(candidate) >= 2 {
+			s = candidate
+		}
+	}
+
+	s = reFeat.ReplaceAllString(s, "")
+	s = reParens.ReplaceAllString(s, "")
+	s = reBrackets.ReplaceAllString(s, "")
+	s = reYouTubeNoise.ReplaceAllString(s, "")
+
+	return clean(s)
 }
 
 // canonicalArtist extracts the core artist name from a raw YouTube uploader string.

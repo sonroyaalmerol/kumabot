@@ -783,12 +783,27 @@ func (p *Player) TryStartRadio() {
 	shouldTry := p.RadioMode &&
 		p.NowPlaying != nil &&
 		(len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)-1) &&
-		p.RadioQueuedIndex < 0
+		p.RadioQueuedIndex < 0 &&
+		p.radioSearchDone == nil
+	playAfter := p.Qpos >= len(p.SongQueue)
 	p.mu.Unlock()
 
-	if shouldTry {
-		go p.tryQueueRadioSong(p.Qpos >= len(p.SongQueue))
+	if !shouldTry {
+		return
 	}
+
+	ch := make(chan struct{})
+	p.mu.Lock()
+	p.radioSearchDone = ch
+	p.mu.Unlock()
+
+	go func() {
+		defer close(ch)
+		p.tryQueueRadioSong(playAfter)
+		p.mu.Lock()
+		p.radioSearchDone = nil
+		p.mu.Unlock()
+	}()
 }
 
 // maybeQueueRadio checks if we should pre-queue a radio song and does so in the background.
