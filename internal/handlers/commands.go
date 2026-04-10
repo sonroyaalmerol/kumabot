@@ -292,14 +292,25 @@ func (h *CommandHandler) reply(s *discordgo.Session, i *discordgo.InteractionCre
 	if ephemeral {
 		flags = 1 << 6
 	}
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: content,
 			Flags:   discordgo.MessageFlags(flags),
 		},
-	}); err != nil {
-		slog.Warn("reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+	})
+	if err != nil {
+		// Interaction expired (404/10062) — fall back to channel message
+		_, followupErr := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: content,
+			Flags:   discordgo.MessageFlags(flags),
+		})
+		if followupErr != nil {
+			_, chanErr := s.ChannelMessageSend(i.ChannelID, content)
+			if chanErr != nil {
+				slog.Warn("all reply methods failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", chanErr)
+			}
+		}
 	}
 }
 
@@ -338,7 +349,7 @@ func (h *CommandHandler) deferReply(s *discordgo.Session, i *discordgo.Interacti
 			Flags: discordgo.MessageFlags(flags),
 		},
 	}); err != nil {
-		slog.Warn("defer reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		slog.Debug("defer reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 	}
 }
 
@@ -346,7 +357,10 @@ func (h *CommandHandler) editReply(s *discordgo.Session, i *discordgo.Interactio
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: &content,
 	}); err != nil {
-		slog.Warn("edit reply failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+		// Interaction expired — fall back to channel message
+		if _, chanErr := s.ChannelMessageSend(i.ChannelID, content); chanErr != nil {
+			slog.Warn("all edit reply methods failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", chanErr)
+		}
 	}
 }
 
