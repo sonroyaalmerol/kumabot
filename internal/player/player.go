@@ -733,6 +733,32 @@ func (p *Player) ShuffleOff() bool {
 	return p.ShuffleMode
 }
 
+// ToggleRadioMode toggles radio mode on/off. Returns the new state.
+func (p *Player) ToggleRadioMode() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.RadioMode = !p.RadioMode
+	return p.RadioMode
+}
+
+// IsRadioMode returns the current radio mode state.
+func (p *Player) IsRadioMode() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.RadioMode
+}
+
+// TryStartRadio attempts to start radio playback if conditions are met.
+func (p *Player) TryStartRadio() {
+	p.mu.Lock()
+	shouldTry := p.RadioMode && (len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)) && p.NowPlaying != nil
+	p.mu.Unlock()
+
+	if shouldTry {
+		p.tryQueueRadioSong()
+	}
+}
+
 // Move moves an item in the queue (1-based positions for the queue after current song)
 func (p *Player) Move(from int, to int) (SongMetadata, error) {
 	p.mu.Lock()
@@ -1144,6 +1170,12 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	}
 
 	if !hasNext {
+		if p.RadioMode && p.NowPlaying != nil {
+			p.mu.Unlock()
+			p.tryQueueRadioSong()
+			return
+		}
+
 		shouldSchedule := p.setIdleStateLocked()
 		p.mu.Unlock()
 
@@ -1162,6 +1194,60 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 		slog.Error("failed to play next song after playback end",
 			"guildID", p.guildID,
 			"error", err)
+		p.setIdleState()
+	}
+}
+
+// tryQueueRadioSong attempts to find and queue a related song for radio mode.
+func (p *Player) tryQueueRadioSong() {
+	ctx := context.Background()
+
+	p.mu.Lock()
+	if !p.RadioMode || p.NowPlaying == nil {
+		p.mu.Unlock()
+		return
+	}
+	currentSong := *p.NowPlaying
+	p.mu.Unlock()
+
+	slog.Info("radio: searching for related song", "guildID", p.guildID, "current", currentSong.Title)
+
+	related, err := p.FindRelatedSong(ctx, currentSong)
+	if err != nil {
+		slog.Error("radio: failed to find related song", "guildID", p.guildID, "error", err)
+		p.setIdleState()
+		return
+	}
+
+	related.IsRadioSuggestion = true
+	related.RequestedBy = "Radio"
+
+	p.mu.Lock()
+	if !p.RadioMode {
+		p.mu.Unlock()
+		return
+	}
+
+	p.addToRadioHistory(related.VideoID)
+	p.SongQueue = append(p.SongQueue, *related)
+	p.RadioQueuedIndex = len(p.SongQueue) - 1
+	p.Qpos++
+
+	session := p.Session
+	textChanID := p.TextChannelID
+	p.mu.Unlock()
+
+	if session != nil && textChanID != "" {
+		embed := BuildRadioQueuedEmbed(related)
+		if _, err := session.ChannelMessageSendEmbed(textChanID, embed); err != nil {
+			slog.Warn("failed to send radio queue embed", "guildID", p.guildID, "err", err)
+		}
+	}
+
+	slog.Info("radio: queued related song", "guildID", p.guildID, "title", related.Title, "artist", related.Artist)
+
+	if err := p.Play(ctx, nil, nil); err != nil {
+		slog.Error("radio: failed to play queued song", "guildID", p.guildID, "error", err)
 		p.setIdleState()
 	}
 }
