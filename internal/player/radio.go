@@ -40,26 +40,21 @@ var (
 	reMultiSpace    = regexp.MustCompile(`\s+`)
 )
 
-// canonicalTitle extracts the core song name from a raw YouTube title.
+// canonicalTitleParts extracts all meaningful parts from a raw YouTube title.
+// YouTube titles are inconsistent: sometimes "Artist - Title", sometimes "Title - Artist",
+// sometimes just "Title". We return both sides of the dash (if any) plus the full cleaned
+// title so that isSameTitle can match regardless of order.
 //
 // Input:  "Adele - Hello (Official Music Video)"
-// Output: "hello"
+// Output: ["hello", "adele", "adele hello"]
 //
-// Input:  "Queen – Bohemian Rhapsody (Lyrics)"
-// Output: "bohemian rhapsody"
+// Input:  "Fallen (Live at The Cozy Cove) - Lola Amour"
+// Output: ["lola amour", "fallen", "fallen lola amour"]
 //
 // Input:  "Smells Like Teen Spirit (Remix)"
-// Output: "smells like teen spirit"
-func canonicalTitle(raw string) string {
+// Output: ["smells like teen spirit"]
+func canonicalTitleParts(raw string) []string {
 	s := strings.ToLower(strings.TrimSpace(raw))
-
-	// If title contains " - " / " – " / " — ", take the part after it (the song name)
-	if parts := reDashSep.Split(s, 2); len(parts) == 2 {
-		candidate := strings.TrimSpace(parts[1])
-		if len(candidate) >= 2 {
-			s = candidate
-		}
-	}
 
 	// Strip feat/ft clauses (e.g., "Song Title feat. Other Artist")
 	s = reFeat.ReplaceAllString(s, "")
@@ -72,7 +67,26 @@ func canonicalTitle(raw string) string {
 	// Strip known YouTube noise phrases
 	s = reYouTubeNoise.ReplaceAllString(s, "")
 
-	return clean(s)
+	s = clean(s)
+
+	parts := reDashSep.Split(s, 2)
+	if len(parts) == 2 {
+		left := strings.TrimSpace(parts[0])
+		right := strings.TrimSpace(parts[1])
+		if left != "" && right != "" {
+			return []string{left, right, left + " " + right}
+		}
+	}
+
+	return []string{s}
+}
+
+// canonicalTitle extracts the core song name from a raw YouTube title.
+func canonicalTitle(raw string) string {
+	parts := canonicalTitleParts(raw)
+	// For backward compatibility, return the first part (which is either the full title
+	// or the left side of the dash)
+	return parts[0]
 }
 
 // canonicalArtist extracts the core artist name from a raw YouTube uploader string.
@@ -172,33 +186,42 @@ func jaccardSimilarity(a, b string) float64 {
 
 // isSameTitle determines if two raw YouTube titles refer to the same song.
 // It handles covers, remixes, live versions, lyric videos, etc.
+// It also handles inconsistent YouTube title formats where artist/title order varies.
 func isSameTitle(rawA, rawB string) bool {
-	a := canonicalTitle(rawA)
-	b := canonicalTitle(rawB)
+	partsA := canonicalTitleParts(rawA)
+	partsB := canonicalTitleParts(rawB)
 
-	if a == b {
-		return true
-	}
+	// Check all pairwise part combinations for exact or similarity match
+	for _, a := range partsA {
+		for _, b := range partsB {
+			if a == b {
+				return true
+			}
 
-	// Check containment for short vs long titles
-	if len(a) > 0 && len(b) > 0 {
-		if strings.Contains(a, b) || strings.Contains(b, a) {
-			longer := a
-			if len(b) > len(a) {
-				longer = b
+			// Check containment for short vs long titles
+			if len(a) > 0 && len(b) > 0 {
+				if strings.Contains(a, b) || strings.Contains(b, a) {
+					longer := a
+					if len(b) > len(a) {
+						longer = b
+					}
+					shorter := b
+					if len(a) < len(b) {
+						shorter = a
+					}
+					if len(tokenize(shorter)) >= 2 && float64(len(shorter))/float64(len(longer)) > 0.5 {
+						return true
+					}
+				}
 			}
-			shorter := b
-			if len(a) < len(b) {
-				shorter = a
-			}
-			// Only accept containment if the shorter string is substantial
-			if len(tokenize(shorter)) >= 2 && float64(len(shorter))/float64(len(longer)) > 0.5 {
+
+			if jaccardSimilarity(a, b) >= titleSimilarityThreshold {
 				return true
 			}
 		}
 	}
 
-	return jaccardSimilarity(a, b) >= titleSimilarityThreshold
+	return false
 }
 
 // isSameArtist determines if two raw YouTube uploader names refer to the same artist.

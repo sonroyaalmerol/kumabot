@@ -799,7 +799,7 @@ func (p *Player) maybeQueueRadio() {
 	shouldQueue := p.RadioMode &&
 		p.NowPlaying != nil &&
 		p.Qpos >= 0 &&
-		p.Qpos == len(p.SongQueue)-1 &&
+		(p.Qpos >= len(p.SongQueue)-1) &&
 		p.RadioQueuedIndex < 0 &&
 		p.radioSearchDone == nil
 	p.mu.Unlock()
@@ -1250,7 +1250,32 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	if !hasNext {
 		if p.RadioMode && p.NowPlaying != nil {
 			p.mu.Unlock()
-			p.tryQueueRadioSong(true)
+			// Retry up to 3 times with fresh searches if the pre-queue failed to find anything
+			for attempt := 0; attempt < 3; attempt++ {
+				p.tryQueueRadioSong(true)
+				// Check if a song was actually queued and played
+				p.mu.Lock()
+				if p.NowPlaying != nil && p.curPlay != nil {
+					p.mu.Unlock()
+					return
+				}
+				if p.Qpos < len(p.SongQueue) {
+					p.mu.Unlock()
+					// Song queued but not yet played, try playing it
+					if err := p.Play(context.Background(), nil, nil); err != nil {
+						slog.Error("radio: failed to play queued song on retry",
+							"guildID", p.guildID, "attempt", attempt+1, "error", err)
+						p.setIdleState()
+					}
+					return
+				}
+				p.mu.Unlock()
+				slog.Warn("radio: search attempt failed, retrying",
+					"guildID", p.guildID, "attempt", attempt+1)
+			}
+			slog.Error("radio: all search attempts failed",
+				"guildID", p.guildID)
+			p.setIdleState()
 			return
 		}
 
