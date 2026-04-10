@@ -501,6 +501,9 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	go p.sendNowPlayingEmbed()
 	go p.startEmbedUpdater(sess.ctx)
 
+	// Check if we should pre-queue a radio song
+	p.maybeQueueRadio()
+
 	return nil
 }
 
@@ -773,6 +776,22 @@ func (p *Player) TryStartRadio() {
 
 	if shouldTry {
 		p.tryQueueRadioSong()
+	}
+}
+
+// maybeQueueRadio checks if we should pre-queue a radio song and does so in the background.
+// Call this when starting playback of a song.
+func (p *Player) maybeQueueRadio() {
+	p.mu.Lock()
+	shouldQueue := p.RadioMode &&
+		p.NowPlaying != nil &&
+		p.Qpos >= 0 &&
+		p.Qpos == len(p.SongQueue)-1 && // This is the last song in queue
+		p.RadioQueuedIndex < 0 // No radio song already queued
+	p.mu.Unlock()
+
+	if shouldQueue {
+		go p.tryQueueRadioSong()
 	}
 }
 
