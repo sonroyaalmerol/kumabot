@@ -249,3 +249,32 @@ func totalLenStr(sec int) string {
 	}
 	return utils.PrettyTime(sec)
 }
+
+// BuildRadioQueuedEmbed creates an embed for when radio queues a related song.
+func BuildRadioQueuedEmbed(song *SongMetadata) *discordgo.MessageEmbed {
+	dur := "live"
+	if !song.IsLive {
+		dur = utils.PrettyTime(song.Length)
+	}
+
+	desc := fmt.Sprintf("📻 **Radio** found a related song and added it to the queue!\n\n**%s**\nBy: %s\nDuration: `[ %s ]`",
+		song.Title,
+		song.Artist,
+		dur,
+	)
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "🔊 Radio Mode",
+		Description: desc,
+		Color:       0x1DB954, // Spotify-like green
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Radio will continue playing similar songs",
+		},
+	}
+
+	if song.Thumbnail != "" {
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: song.Thumbnail}
+	}
+
+	return embed
+}
