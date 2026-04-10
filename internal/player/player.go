@@ -119,7 +119,15 @@ func (p *Player) setIdleStateLocked() bool {
 	p.Status = StatusIdle
 	p.NowPlaying = nil
 	p.PositionSec = 0
+	p.RadioQueuedIndex = -1
+	p.radioSearchDone = nil
 	return len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
+}
+
+func (p *Player) invalidateURLCacheLocked() {
+	p.lastResolvedURL = ""
+	p.lastVideoID = ""
+	p.urlResolvedAt = time.Time{}
 }
 
 func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID string) error {
@@ -217,9 +225,7 @@ func (p *Player) Disconnect() {
 	p.RadioQueuedIndex = -1
 	p.radioSearchDone = nil
 
-	p.lastResolvedURL = ""
-	p.lastVideoID = ""
-	p.urlResolvedAt = time.Time{}
+	p.invalidateURLCacheLocked()
 
 	if p.DisconnectTimer != nil {
 		p.DisconnectTimer.Stop()
@@ -283,9 +289,7 @@ func (p *Player) Clear() {
 	p.Qpos = 0
 	p.RadioQueuedIndex = -1
 
-	p.lastResolvedURL = ""
-	p.lastVideoID = ""
-	p.urlResolvedAt = time.Time{}
+	p.invalidateURLCacheLocked()
 }
 
 func (p *Player) currentLocked() *SongMetadata {
@@ -592,9 +596,7 @@ func (p *Player) Stop() {
 	p.RadioQueuedIndex = -1
 	p.radioSearchDone = nil
 
-	p.lastResolvedURL = ""
-	p.lastVideoID = ""
-	p.urlResolvedAt = time.Time{}
+	p.invalidateURLCacheLocked()
 	p.lastEmbedMessage = nil
 
 	if p.DisconnectTimer != nil {
@@ -620,9 +622,7 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 		if p.RadioMode && p.NowPlaying != nil {
 			p.Qpos = len(p.SongQueue)
 			p.cancelIdleDisconnectLocked()
-			p.lastResolvedURL = ""
-			p.lastVideoID = ""
-			p.urlResolvedAt = time.Time{}
+			p.invalidateURLCacheLocked()
 			p.mu.Unlock()
 
 			slog.Info("forward skipped past queue end, triggering radio",
@@ -650,9 +650,7 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 	p.Qpos += n
 	p.PositionSec = 0
 
-	p.lastResolvedURL = ""
-	p.lastVideoID = ""
-	p.urlResolvedAt = time.Time{}
+	p.invalidateURLCacheLocked()
 
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
@@ -671,9 +669,7 @@ func (p *Player) Back(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	p.Qpos--
 	p.PositionSec = 0
 
-	p.lastResolvedURL = ""
-	p.lastVideoID = ""
-	p.urlResolvedAt = time.Time{}
+	p.invalidateURLCacheLocked()
 
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
@@ -790,50 +786,49 @@ func (p *Player) IsRadioMode() bool {
 	return p.RadioMode
 }
 
+// sendTextEmbed sends an embed to the player's text channel. Safe to call without holding p.mu.
+func (p *Player) sendTextEmbed(embed *discordgo.MessageEmbed) {
+	p.mu.Lock()
+	s := p.Session
+	ch := p.TextChannelID
+	p.mu.Unlock()
+
+	if s == nil || ch == "" {
+		return
+	}
+	if _, err := s.ChannelMessageSendEmbed(ch, embed); err != nil {
+		slog.Warn("failed to send embed", "guildID", p.guildID, "err", err)
+	}
+}
+
 // TryStartRadio attempts to start radio playback if conditions are met.
 // Called when radio mode is toggled on.
 func (p *Player) TryStartRadio() {
 	p.mu.Lock()
-	shouldTry := p.RadioMode &&
-		p.NowPlaying != nil &&
-		(len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)-1) &&
-		p.RadioQueuedIndex < 0 &&
-		p.radioSearchDone == nil
 	playAfter := p.Qpos >= len(p.SongQueue)
 	p.mu.Unlock()
-
-	if !shouldTry {
-		return
-	}
-
-	ch := make(chan struct{})
-	p.mu.Lock()
-	p.radioSearchDone = ch
-	p.mu.Unlock()
-
-	go func() {
-		defer close(ch)
-		p.tryQueueRadioSong(playAfter)
-		p.mu.Lock()
-		p.radioSearchDone = nil
-		p.mu.Unlock()
-	}()
+	p.startRadioSearch(true, playAfter)
 }
 
 // maybeQueueRadio checks if we should pre-queue a radio song and does so in the background.
-// Call this when starting playback of a song. The search runs in a goroutine and
-// radioSearchDone is closed when it finishes, so handlePlaybackEnd can wait for it.
+// Called when starting playback of a song.
 func (p *Player) maybeQueueRadio() {
+	p.startRadioSearch(false, false)
+}
+
+// startRadioSearch checks conditions and launches a background radio search.
+// playNow starts playback immediately after queueing (used when queue is empty).
+func (p *Player) startRadioSearch(checkQueueEnd, playNow bool) {
 	p.mu.Lock()
-	shouldQueue := p.RadioMode &&
+	should := p.RadioMode &&
 		p.NowPlaying != nil &&
 		p.Qpos >= 0 &&
-		(p.Qpos >= len(p.SongQueue)-1) &&
+		(!checkQueueEnd || p.Qpos >= len(p.SongQueue)-1) &&
 		p.RadioQueuedIndex < 0 &&
 		p.radioSearchDone == nil
 	p.mu.Unlock()
 
-	if !shouldQueue {
+	if !should {
 		return
 	}
 
@@ -844,7 +839,7 @@ func (p *Player) maybeQueueRadio() {
 
 	go func() {
 		defer close(ch)
-		p.tryQueueRadioSong(false)
+		p.tryQueueRadioSong(playNow)
 		p.mu.Lock()
 		p.radioSearchDone = nil
 		p.mu.Unlock()
@@ -1279,32 +1274,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	if !hasNext {
 		if p.RadioMode && p.NowPlaying != nil {
 			p.mu.Unlock()
-			// Retry up to 3 times with fresh searches if the pre-queue failed to find anything
-			for attempt := 0; attempt < 3; attempt++ {
-				p.tryQueueRadioSong(true)
-				// Check if a song was actually queued and played
-				p.mu.Lock()
-				if p.NowPlaying != nil && p.curPlay != nil {
-					p.mu.Unlock()
-					return
-				}
-				if p.Qpos < len(p.SongQueue) {
-					p.mu.Unlock()
-					// Song queued but not yet played, try playing it
-					if err := p.Play(context.Background(), nil, nil); err != nil {
-						slog.Error("radio: failed to play queued song on retry",
-							"guildID", p.guildID, "attempt", attempt+1, "error", err)
-						p.setIdleState()
-					}
-					return
-				}
-				p.mu.Unlock()
-				slog.Warn("radio: search attempt failed, retrying",
-					"guildID", p.guildID, "attempt", attempt+1)
-			}
-			slog.Error("radio: all search attempts failed",
-				"guildID", p.guildID)
-			p.setIdleState()
+			p.tryQueueRadioSong(true)
 			return
 		}
 
@@ -1348,19 +1318,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	related, err := p.FindRelatedSong(ctx, currentSong)
 	if err != nil {
 		slog.Error("radio: failed to find related song", "guildID", p.guildID, "error", err)
-
-		p.mu.Lock()
-		session := p.Session
-		textChanID := p.TextChannelID
-		p.mu.Unlock()
-
-		if session != nil && textChanID != "" {
-			embed := BuildRadioFailedEmbed()
-			if _, msgErr := session.ChannelMessageSendEmbed(textChanID, embed); msgErr != nil {
-				slog.Warn("failed to send radio failure embed", "guildID", p.guildID, "err", msgErr)
-			}
-		}
-
+		p.sendTextEmbed(BuildRadioFailedEmbed())
 		if playAfter {
 			p.setIdleState()
 		}
@@ -1380,16 +1338,9 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	p.SongQueue = append(p.SongQueue, *related)
 	p.RadioQueuedIndex = len(p.SongQueue) - 1
 
-	session := p.Session
-	textChanID := p.TextChannelID
 	p.mu.Unlock()
 
-	if session != nil && textChanID != "" {
-		embed := BuildRadioQueuedEmbed(related)
-		if _, err := session.ChannelMessageSendEmbed(textChanID, embed); err != nil {
-			slog.Warn("failed to send radio queue embed", "guildID", p.guildID, "err", err)
-		}
-	}
+	p.sendTextEmbed(BuildRadioQueuedEmbed(related))
 
 	slog.Info("radio: queued related song", "guildID", p.guildID, "title", related.Title, "artist", related.Artist)
 

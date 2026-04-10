@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/sonroyaalmerol/kumabot/internal/stream"
@@ -20,9 +21,10 @@ const (
 )
 
 type radioHistoryEntry struct {
-	VideoID string
-	Title   string
-	Artist  string
+	VideoID        string
+	Title          string
+	Artist         string
+	CanonicalParts []string // pre-computed by canonicalTitleParts
 }
 
 // ---------- canonical parsing ----------
@@ -55,19 +57,6 @@ func clean(s string) string {
 	s = reNonAlphaNum.ReplaceAllString(s, " ")
 	s = reMultiSpace.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
-}
-
-// extractArtistFromTitle tries to get the real artist from a YouTube title.
-// YouTube titles often embed the artist like "Song - Artist" or "Artist - Song".
-// Returns the extracted artist string, or "" if not found.
-func extractArtistFromTitle(raw string) string {
-	parts := canonicalTitleParts(raw)
-	// canonicalTitleParts returns [left, right, combined] when a dash is present.
-	// We can't know which side is the artist, so return both for the caller to use.
-	if len(parts) >= 2 {
-		return parts[1] // the side that canonicalTitle doesn't return
-	}
-	return ""
 }
 
 // canonicalTitleParts extracts all meaningful parts from a raw YouTube title.
@@ -182,17 +171,17 @@ func jaccardSimilarity(a, b string) float64 {
 // It handles covers, remixes, live versions, lyric videos, etc.
 // It also handles inconsistent YouTube title formats where artist/title order varies.
 func isSameTitle(rawA, rawB string) bool {
-	partsA := canonicalTitleParts(rawA)
-	partsB := canonicalTitleParts(rawB)
+	return partsSimilar(canonicalTitleParts(rawA), canonicalTitleParts(rawB))
+}
 
-	// Check all pairwise part combinations for exact or similarity match
+// partsSimilar checks if any pair of canonical title parts matches.
+func partsSimilar(partsA, partsB []string) bool {
 	for _, a := range partsA {
 		for _, b := range partsB {
 			if a == b {
 				return true
 			}
 
-			// Check containment for short vs long titles
 			if len(a) > 0 && len(b) > 0 {
 				if strings.Contains(a, b) || strings.Contains(b, a) {
 					longer := a
@@ -309,15 +298,17 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 
 	titleCore := extractTitleCore(current.Title)
 
-	// Collect artist candidates: both from the uploader field and from the title itself.
-	// YouTube titles often embed the real artist (e.g., "Multo — Cup of Joe (Lyrics)")
-	// while the uploader may be a compilation channel (e.g., "Nine Degrees North").
+	// Collect artist candidates from both the uploader and the title itself.
 	var artistCandidates []string
 	for _, a := range canonicalArtist(current.Artist) {
-		artistCandidates = appendIfAbsent(artistCandidates, a)
+		if !slices.Contains(artistCandidates, a) {
+			artistCandidates = append(artistCandidates, a)
+		}
 	}
-	if fromTitle := extractArtistFromTitle(current.Title); fromTitle != "" {
-		artistCandidates = appendIfAbsent(artistCandidates, fromTitle)
+	if parts := canonicalTitleParts(current.Title); len(parts) >= 2 {
+		if !slices.Contains(artistCandidates, parts[1]) {
+			artistCandidates = append(artistCandidates, parts[1])
+		}
 	}
 
 	artistStr := ""
@@ -325,7 +316,6 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 		artistStr = artistCandidates[0]
 	}
 
-	// Strategy 1: Artist + genre-like queries for discovery
 	if artistStr != "" {
 		queries = append(queries,
 			fmt.Sprintf("ytsearch5:%s similar songs", artistStr),
@@ -333,50 +323,35 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 		)
 	}
 
-	// Strategy 2: Title keywords for genre/mood matching
 	if titleCore != "" {
 		queries = append(queries,
 			fmt.Sprintf("ytsearch5:songs like %s", titleCore),
 		)
 	}
 
-	// Strategy 3: Artist + title mix for very close matches
 	if artistStr != "" && titleCore != "" {
 		queries = append(queries,
 			fmt.Sprintf("ytsearch5:%s %s", artistStr, titleCore),
 		)
 	}
 
-	// Strategy 4: Additional artist candidates from title or collaboration
 	for i := 1; i < len(artistCandidates); i++ {
 		queries = append(queries,
 			fmt.Sprintf("ytsearch5:%s music", artistCandidates[i]),
 		)
 	}
 
-	// Strategy 5: Broad discovery
 	if artistStr != "" {
 		queries = append(queries,
 			fmt.Sprintf("ytsearch5:%s", artistStr),
 		)
 	}
 
-	// Shuffle for variety
 	rand.Shuffle(len(queries), func(i, j int) {
 		queries[i], queries[j] = queries[j], queries[i]
 	})
 
 	return queries
-}
-
-// appendIfAbsent appends s to slice only if not already present.
-func appendIfAbsent(slice []string, s string) []string {
-	for _, v := range slice {
-		if v == s {
-			return slice
-		}
-	}
-	return append(slice, s)
 }
 
 // searchYouTube performs a YouTube search and returns results as SongMetadata.
@@ -443,8 +418,11 @@ func (p *Player) isSuitableRadioChoice(candidate *SongMetadata, current SongMeta
 		return false
 	}
 
+	// Pre-compute candidate parts once for all history comparisons
+	candidateParts := canonicalTitleParts(candidate.Title)
+
 	// Reject same/similar title as the currently playing song
-	if isSameTitle(candidate.Title, current.Title) {
+	if partsSimilar(candidateParts, canonicalTitleParts(current.Title)) {
 		slog.Debug("radio: skipping similar title",
 			"candidate", candidate.Title,
 			"current", current.Title,
@@ -460,7 +438,7 @@ func (p *Player) isSuitableRadioChoice(candidate *SongMetadata, current SongMeta
 			slog.Debug("radio: skipping recently played", "title", candidate.Title, "guildID", p.guildID)
 			return false
 		}
-		if isSameTitle(candidate.Title, entry.Title) {
+		if partsSimilar(candidateParts, entry.CanonicalParts) {
 			slog.Debug("radio: skipping title from history",
 				"candidate", candidate.Title,
 				"guildID", p.guildID)
@@ -468,22 +446,26 @@ func (p *Player) isSuitableRadioChoice(candidate *SongMetadata, current SongMeta
 		}
 		if isSameArtist(candidate.Artist, entry.Artist) {
 			sameArtistCount++
+			if sameArtistCount >= maxSameArtistCount {
+				slog.Debug("radio: skipping artist cap reached",
+					"artist", candidate.Artist,
+					"count", sameArtistCount,
+					"guildID", p.guildID)
+				return false
+			}
 		}
-	}
-
-	if sameArtistCount >= maxSameArtistCount {
-		slog.Debug("radio: skipping artist cap reached",
-			"artist", candidate.Artist,
-			"count", sameArtistCount,
-			"guildID", p.guildID)
-		return false
 	}
 
 	return true
 }
 
 func (p *Player) addToRadioHistory(videoID string, title string, artist string) {
-	p.RadioHistory = append(p.RadioHistory, radioHistoryEntry{VideoID: videoID, Title: title, Artist: artist})
+	p.RadioHistory = append(p.RadioHistory, radioHistoryEntry{
+		VideoID:        videoID,
+		Title:          title,
+		Artist:         artist,
+		CanonicalParts: canonicalTitleParts(title),
+	})
 	if len(p.RadioHistory) > maxRadioHistory {
 		p.RadioHistory = p.RadioHistory[len(p.RadioHistory)-maxRadioHistory:]
 	}
