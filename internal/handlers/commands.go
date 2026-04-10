@@ -620,13 +620,14 @@ func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.Interaction
 		slog.Debug("fseek command failed: beyond song length", "guildID", i.GuildID, "userID", userIDOf(i), "requested", newPos, "length", cur.Length)
 		return
 	}
+	h.deferReply(s, i, false)
 	if err := player.Seek(context.Background(), s, i, newPos); err != nil {
 		slog.Warn("fseek failed", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec, "err", err)
-		h.reply(s, i, fmt.Sprintf("seek failed: %v", err), true)
+		h.editReply(s, i, fmt.Sprintf("seek failed: %v", err))
 		return
 	}
 	slog.Info("cmd fseek", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec, "newPosition", newPos)
-	h.reply(s, i, "👍 seeked to "+utils.PrettyTime(newPos), false)
+	h.editReply(s, i, "👍 seeked to "+utils.PrettyTime(newPos))
 }
 
 func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -923,13 +924,14 @@ func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionC
 		slog.Error("next command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
+	h.deferReply(s, i, false)
 	if err := player.Next(context.Background(), s, i); err != nil {
 		slog.Warn("next failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
-		h.reply(s, i, fmt.Sprintf("failed to skip: %v", err), true)
+		h.editReply(s, i, fmt.Sprintf("failed to skip: %v", err))
 		return
 	}
 	slog.Info("cmd next", "guildID", i.GuildID, "userID", userIDOf(i))
-	h.reply(s, i, "skipped to next", false)
+	h.editReply(s, i, "skipped to next")
 }
 
 func (h *CommandHandler) cmdPause(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1034,13 +1036,14 @@ func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.Interactio
 		slog.Error("replay command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
+	h.deferReply(s, i, false)
 	if err := player.Replay(context.Background(), s, i); err != nil {
 		slog.Warn("replay failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
-		h.reply(s, i, fmt.Sprintf("replay failed: %v", err), true)
+		h.editReply(s, i, fmt.Sprintf("replay failed: %v", err))
 		return
 	}
 	slog.Info("cmd replay", "guildID", i.GuildID, "userID", userIDOf(i))
-	h.reply(s, i, "👍 replayed the current song", false)
+	h.editReply(s, i, "👍 replayed the current song")
 }
 
 func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1060,13 +1063,14 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 		slog.Debug("resume command failed: no current song", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
+	h.deferReply(s, i, false)
 	if err := player.Resume(context.Background(), s, i); err != nil {
 		slog.Warn("resume failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
-		h.reply(s, i, fmt.Sprintf("resume failed: %v", err), true)
+		h.editReply(s, i, fmt.Sprintf("resume failed: %v", err))
 		return
 	}
 	slog.Info("cmd resume", "guildID", i.GuildID, "userID", userIDOf(i))
-	h.reply(s, i, "the stop-and-go light is now green", false)
+	h.editReply(s, i, "the stop-and-go light is now green")
 }
 
 func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1076,18 +1080,19 @@ func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.Interactio
 		slog.Error("unskip command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
+	h.deferReply(s, i, false)
 	if err := player.Back(context.Background(), s, i); err != nil {
 		slog.Warn("unskip/back failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
-		h.reply(s, i, fmt.Sprintf("can't go back: %v", err), true)
+		h.editReply(s, i, fmt.Sprintf("can't go back: %v", err))
 		return
 	}
 	cur := player.GetCurrent()
 	if cur != nil {
 		slog.Info("cmd unskip", "guildID", i.GuildID, "userID", userIDOf(i), "title", cur.Title)
-		h.reply(s, i, fmt.Sprintf("back 'er up' — now playing %s", utils.EscapeMd(cur.Title)), false)
+		h.editReply(s, i, fmt.Sprintf("back 'er up' — now playing %s", utils.EscapeMd(cur.Title)))
 	} else {
 		slog.Info("cmd unskip", "guildID", i.GuildID, "userID", userIDOf(i))
-		h.reply(s, i, "back 'er up'", false)
+		h.editReply(s, i, "back 'er up'")
 	}
 }
 
