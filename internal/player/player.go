@@ -769,13 +769,17 @@ func (p *Player) IsRadioMode() bool {
 }
 
 // TryStartRadio attempts to start radio playback if conditions are met.
+// Called when radio mode is toggled on.
 func (p *Player) TryStartRadio() {
 	p.mu.Lock()
-	shouldTry := p.RadioMode && (len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)) && p.NowPlaying != nil
+	shouldTry := p.RadioMode &&
+		p.NowPlaying != nil &&
+		(len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)-1) &&
+		p.RadioQueuedIndex < 0
 	p.mu.Unlock()
 
 	if shouldTry {
-		p.tryQueueRadioSong(true)
+		go p.tryQueueRadioSong(p.Qpos >= len(p.SongQueue))
 	}
 }
 

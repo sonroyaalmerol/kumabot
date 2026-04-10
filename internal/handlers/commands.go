@@ -864,12 +864,7 @@ func (h *CommandHandler) cmdRadio(s *discordgo.Session, i *discordgo.Interaction
 	slog.Info("cmd radio", "guildID", i.GuildID, "userID", userIDOf(i), "on", on)
 
 	if on {
-		// Check if we should trigger radio immediately (queue is empty but something was playing)
-		go func() {
-			if player.QueueSize() == 0 && player.GetCurrent() != nil {
-				player.TryStartRadio()
-			}
-		}()
+		go player.TryStartRadio()
 		h.reply(s, i, "📻 Radio mode enabled! I'll automatically queue related songs when the queue ends.", false)
 	} else {
 		h.reply(s, i, "📻 Radio mode disabled. I'll stop auto-queuing songs.", false)
