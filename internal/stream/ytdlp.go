@@ -210,7 +210,37 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 	ext := infos[0]
 	out := &YTDLPInfo{}
 
-	// Playlist/search container
+	mapExtToEntry := func(e *ytdlp.ExtractedInfo) YTDLPEntry {
+		return YTDLPEntry{
+			Id:               e.ID,
+			Title:            s(e.Title),
+			Uploader:         s(e.Uploader),
+			Duration:         f(e.Duration),
+			IsLive:           b(e.IsLive),
+			Description:      s(e.Description),
+			WebpageUrl:       s(e.WebpageURL),
+			Url:              s(e.URL),
+			Thumbnails:       mapThumbs(e.Thumbnails),
+			Formats:          mapFormats(e.Formats),
+			RequestedFormats: mapReqFormats(e.RequestedFormats),
+		}
+	}
+
+	mapExtToInfo := func(e *ytdlp.ExtractedInfo) {
+		out.Id = e.ID
+		out.Title = s(e.Title)
+		out.Uploader = s(e.Uploader)
+		out.Duration = f(e.Duration)
+		out.IsLive = b(e.IsLive)
+		out.Description = s(e.Description)
+		out.WebpageUrl = s(e.WebpageURL)
+		out.Url = s(e.URL)
+		out.Thumbnails = mapThumbs(e.Thumbnails)
+		out.Formats = mapFormats(e.Formats)
+		out.RequestedFormats = mapReqFormats(e.RequestedFormats)
+	}
+
+	// Playlist container with nested entries
 	if len(ext.Entries) > 0 {
 		ytdlpDebugf("got playlist with %d entries", len(ext.Entries))
 		out.Entries = make([]YTDLPEntry, 0, len(ext.Entries))
@@ -218,55 +248,37 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 			if e == nil {
 				continue
 			}
-			entry := YTDLPEntry{
-				Id:          e.ID,
-				Title:       s(e.Title),
-				Uploader:    s(e.Uploader),
-				Duration:    f(e.Duration),
-				IsLive:      b(e.IsLive),
-				Description: s(e.Description),
-				WebpageUrl:  s(e.WebpageURL),
-				Url:         s(e.URL),
-				Thumbnails:  mapThumbs(e.Thumbnails),
-				Formats:     mapFormats(e.Formats),
-				RequestedFormats: mapReqFormats(
-					e.RequestedFormats,
-				),
-			}
-			out.Entries = append(out.Entries, entry)
+			out.Entries = append(out.Entries, mapExtToEntry(e))
 		}
 		for _, first := range ext.Entries {
 			if first == nil {
 				continue
 			}
-			out.Id = first.ID
-			out.Title = s(first.Title)
-			out.Uploader = s(first.Uploader)
-			out.Duration = f(first.Duration)
-			out.IsLive = b(first.IsLive)
-			out.Description = s(first.Description)
-			out.WebpageUrl = s(first.WebpageURL)
-			out.Url = s(first.URL)
-			out.Thumbnails = mapThumbs(first.Thumbnails)
-			out.Formats = mapFormats(first.Formats)
-			out.RequestedFormats = mapReqFormats(first.RequestedFormats)
+			mapExtToInfo(first)
 			break
 		}
 		return out, nil
 	}
 
+	// Multiple top-level items (e.g. ytsearch10: queries return each result separately)
+	if len(infos) > 1 {
+		ytdlpDebugf("got %d top-level items (search results)", len(infos))
+		out.Entries = make([]YTDLPEntry, 0, len(infos))
+		for _, item := range infos {
+			if item == nil {
+				continue
+			}
+			out.Entries = append(out.Entries, mapExtToEntry(item))
+		}
+		if len(out.Entries) > 0 {
+			first := infos[0]
+			mapExtToInfo(first)
+		}
+		return out, nil
+	}
+
 	// Single item
-	out.Id = ext.ID
-	out.Title = s(ext.Title)
-	out.Uploader = s(ext.Uploader)
-	out.Duration = f(ext.Duration)
-	out.IsLive = b(ext.IsLive)
-	out.Description = s(ext.Description)
-	out.WebpageUrl = s(ext.WebpageURL)
-	out.Url = s(ext.URL)
-	out.Thumbnails = mapThumbs(ext.Thumbnails)
-	out.Formats = mapFormats(ext.Formats)
-	out.RequestedFormats = mapReqFormats(ext.RequestedFormats)
+	mapExtToInfo(ext)
 
 	ytdlpDebugf("single item: id=%s title=%s is_live=%v url=%s", out.Id, out.Title, out.IsLive, out.Url)
 
