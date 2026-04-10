@@ -19,33 +19,33 @@ type YTDLPFormat struct {
 	Url string `json:"url"`
 }
 
+type YTDLPThumbnail struct {
+	Url string `json:"url"`
+}
+
 type YTDLPEntry struct {
-	Id          string  `json:"id"`
-	Title       string  `json:"title"`
-	Uploader    string  `json:"uploader"`
-	Duration    float64 `json:"duration"`
-	IsLive      bool    `json:"is_live"`
-	Description string  `json:"description"`
-	WebpageUrl  string  `json:"webpage_url"`
-	Thumbnails  []struct {
-		Url string `json:"url"`
-	} `json:"thumbnails"`
+	Id               string                 `json:"id"`
+	Title            string                 `json:"title"`
+	Uploader         string                 `json:"uploader"`
+	Duration         float64                `json:"duration"`
+	IsLive           bool                   `json:"is_live"`
+	Description      string                 `json:"description"`
+	WebpageUrl       string                 `json:"webpage_url"`
+	Thumbnails       []YTDLPThumbnail       `json:"thumbnails"`
 	Formats          []YTDLPFormat          `json:"formats"`
 	RequestedFormats []YTDLPRequestedFormat `json:"requested_formats"`
 	Url              string                 `json:"url"`
 }
 
 type YTDLPInfo struct {
-	Id          string  `json:"id"`
-	Title       string  `json:"title"`
-	Uploader    string  `json:"uploader"`
-	Duration    float64 `json:"duration"`
-	IsLive      bool    `json:"is_live"`
-	Description string  `json:"description"`
-	WebpageUrl  string  `json:"webpage_url"`
-	Thumbnails  []struct {
-		Url string `json:"url"`
-	} `json:"thumbnails"`
+	Id               string                 `json:"id"`
+	Title            string                 `json:"title"`
+	Uploader         string                 `json:"uploader"`
+	Duration         float64                `json:"duration"`
+	IsLive           bool                   `json:"is_live"`
+	Description      string                 `json:"description"`
+	WebpageUrl       string                 `json:"webpage_url"`
+	Thumbnails       []YTDLPThumbnail       `json:"thumbnails"`
 	Formats          []YTDLPFormat          `json:"formats"`
 	RequestedFormats []YTDLPRequestedFormat `json:"requested_formats"`
 	Url              string                 `json:"url"`
@@ -125,22 +125,16 @@ func b(ptr *bool) bool {
 	return *ptr
 }
 
-func mapThumbs(ts []*ytdlp.ExtractedThumbnail) []struct {
-	Url string `json:"url"`
-} {
+func mapThumbs(ts []*ytdlp.ExtractedThumbnail) []YTDLPThumbnail {
 	if len(ts) == 0 {
 		return nil
 	}
-	out := make([]struct {
-		Url string `json:"url"`
-	}, 0, len(ts))
+	out := make([]YTDLPThumbnail, 0, len(ts))
 	for _, t := range ts {
 		if t == nil {
 			continue
 		}
-		out = append(out, struct {
-			Url string `json:"url"`
-		}{Url: t.URL})
+		out = append(out, YTDLPThumbnail{Url: t.URL})
 	}
 	return out
 }
