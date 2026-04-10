@@ -18,6 +18,7 @@ const (
 	titleSimilarityThreshold  = 0.65
 	artistSimilarityThreshold = 0.7
 	maxRadioSongDuration      = 900 // 15 minutes — filters out playlists, mixes, compilations
+	radioSearchCount          = 10  // number of results per YouTube search query
 )
 
 type radioHistoryEntry struct {
@@ -298,16 +299,21 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 
 	titleCore := extractTitleCore(current.Title)
 
-	// Collect artist candidates from both the uploader and the title itself.
+	// Collect artist candidates from the title first (real artist), then uploader.
+	// YouTube titles often embed the actual artist while uploaders are compilation channels.
 	var artistCandidates []string
+	if parts := canonicalTitleParts(current.Title); len(parts) >= 2 {
+		// Both sides of the dash could be the artist — add the side that
+		// canonicalTitle doesn't return (the "other" part).
+		for _, p := range parts[:2] {
+			if !slices.Contains(artistCandidates, p) {
+				artistCandidates = append(artistCandidates, p)
+			}
+		}
+	}
 	for _, a := range canonicalArtist(current.Artist) {
 		if !slices.Contains(artistCandidates, a) {
 			artistCandidates = append(artistCandidates, a)
-		}
-	}
-	if parts := canonicalTitleParts(current.Title); len(parts) >= 2 {
-		if !slices.Contains(artistCandidates, parts[1]) {
-			artistCandidates = append(artistCandidates, parts[1])
 		}
 	}
 
@@ -318,32 +324,32 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 
 	if artistStr != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s similar songs", artistStr),
-			fmt.Sprintf("ytsearch5:songs like %s", artistStr),
+			fmt.Sprintf("ytsearch%d:%s similar songs", radioSearchCount, artistStr),
+			fmt.Sprintf("ytsearch%d:songs like %s", radioSearchCount, artistStr),
 		)
 	}
 
 	if titleCore != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:songs like %s", titleCore),
+			fmt.Sprintf("ytsearch%d:songs like %s", radioSearchCount, titleCore),
 		)
 	}
 
 	if artistStr != "" && titleCore != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s %s", artistStr, titleCore),
+			fmt.Sprintf("ytsearch%d:%s %s", radioSearchCount, artistStr, titleCore),
 		)
 	}
 
 	for i := 1; i < len(artistCandidates); i++ {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s music", artistCandidates[i]),
+			fmt.Sprintf("ytsearch%d:%s music", radioSearchCount, artistCandidates[i]),
 		)
 	}
 
 	if artistStr != "" {
 		queries = append(queries,
-			fmt.Sprintf("ytsearch5:%s", artistStr),
+			fmt.Sprintf("ytsearch%d:%s", radioSearchCount, artistStr),
 		)
 	}
 
