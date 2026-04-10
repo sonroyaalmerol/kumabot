@@ -285,6 +285,58 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 	return out, nil
 }
 
+// YtdlpGetRelated fetches YouTube's auto-generated "Radio" mix for a video using the RD playlist.
+// Returns up to limit related videos as flat entries.
+func YtdlpGetRelated(ctx context.Context, cfg *config.Config, videoID string, limit int) ([]YTDLPEntry, error) {
+	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
+
+	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", videoID, videoID)
+
+	cmd := ytdlp.New().
+		FlatPlaylist().
+		DumpJSON().
+		PlaylistEnd(limit)
+
+	if cfg.YouTubeCookiesPath != "" {
+		cmd = cmd.Cookies(cfg.YouTubeCookiesPath)
+	}
+
+	if cfg.YouTubePOToken != "" {
+		cmd = cmd.ExtractorArgs("youtube:player-client=default,mweb;po_token=" + cfg.YouTubePOToken)
+	}
+
+	ytdlpDebugf("running yt-dlp for related: %s (limit=%d)", url, limit)
+	res, err := cmd.Run(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("yt-dlp related: %w", err)
+	}
+
+	infos, err := res.GetExtractedInfo()
+	if err != nil {
+		return nil, fmt.Errorf("parse yt-dlp related json: %w", err)
+	}
+
+	var entries []YTDLPEntry
+	for _, item := range infos {
+		if item == nil || item.ID == "" {
+			continue
+		}
+		entries = append(entries, YTDLPEntry{
+			Id:        item.ID,
+			Title:     s(item.Title),
+			Uploader:  s(item.Uploader),
+			Duration:  f(item.Duration),
+			IsLive:    b(item.IsLive),
+		})
+		if len(entries) >= limit {
+			break
+		}
+	}
+
+	ytdlpDebugf("got %d related entries for %s", len(entries), videoID)
+	return entries, nil
+}
+
 func isManifestURL(u string) bool {
 	if u == "" {
 		return false

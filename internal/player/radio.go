@@ -18,7 +18,7 @@ const (
 	titleSimilarityThreshold  = 0.65
 	artistSimilarityThreshold = 0.7
 	maxRadioSongDuration      = 900 // 15 minutes — filters out playlists, mixes, compilations
-	radioSearchCount          = 10  // number of results per YouTube search query
+	radioSearchCount          = 10  // number of results per YouTube fallback search query
 )
 
 type radioHistoryEntry struct {
@@ -270,19 +270,34 @@ func extractTitleCore(raw string) string {
 
 // ---------- main radio logic ----------
 
-// FindRelatedSong finds a song related to the given song using YouTube search.
+const radioRelatedCount = 30 // how many related videos to fetch from YouTube
+
+// FindRelatedSong finds a song related to the given song using YouTube's own recommendation engine.
 func (p *Player) FindRelatedSong(ctx context.Context, current SongMetadata) (*SongMetadata, error) {
+	// Primary: YouTube's auto-generated "Radio" mix playlist
+	if current.VideoID != "" {
+		results, err := p.fetchYouTubeRelated(ctx, current.VideoID)
+		if err != nil {
+			slog.Warn("radio: YouTube related fetch failed, falling back to search",
+				"videoID", current.VideoID, "error", err, "guildID", p.guildID)
+		} else {
+			for _, result := range results {
+				if p.isSuitableRadioChoice(result, current) {
+					return result, nil
+				}
+			}
+		}
+	}
+
+	// Fallback: manual search queries
 	searchQueries := p.buildSearchQueries(current)
-
 	for _, query := range searchQueries {
-		slog.Debug("radio search query", "query", query, "guildID", p.guildID)
-
+		slog.Debug("radio fallback search query", "query", query, "guildID", p.guildID)
 		results, err := p.searchYouTube(ctx, query)
 		if err != nil {
 			slog.Warn("radio search failed", "query", query, "error", err, "guildID", p.guildID)
 			continue
 		}
-
 		for _, result := range results {
 			if p.isSuitableRadioChoice(result, current) {
 				return result, nil
@@ -358,6 +373,31 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 	})
 
 	return queries
+}
+
+// fetchYouTubeRelated uses YouTube's auto-generated RD playlist to get related videos.
+func (p *Player) fetchYouTubeRelated(ctx context.Context, videoID string) ([]*SongMetadata, error) {
+	entries, err := stream.YtdlpGetRelated(ctx, p.cfg, videoID, radioRelatedCount)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []*SongMetadata
+	for _, entry := range entries {
+		if entry.Id == "" || entry.Id == videoID {
+			continue
+		}
+		results = append(results, &SongMetadata{
+			Title:   entry.Title,
+			Artist:  entry.Uploader,
+			VideoID: entry.Id,
+			URL:     entry.Id,
+			Length:  int(entry.Duration),
+			IsLive:  entry.IsLive,
+			Source:  SourceYouTube,
+		})
+	}
+	return results, nil
 }
 
 // searchYouTube performs a YouTube search and returns results as SongMetadata.
