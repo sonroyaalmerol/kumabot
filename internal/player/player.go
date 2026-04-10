@@ -497,6 +497,10 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
 	p.PositionSec = pos
+	// If the song we're about to play was the radio suggestion, consume it
+	if p.RadioQueuedIndex == p.Qpos {
+		p.RadioQueuedIndex = -1
+	}
 	p.mu.Unlock()
 
 	// Start sender loop
