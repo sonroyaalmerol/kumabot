@@ -775,7 +775,7 @@ func (p *Player) TryStartRadio() {
 	p.mu.Unlock()
 
 	if shouldTry {
-		p.tryQueueRadioSong()
+		p.tryQueueRadioSong(true)
 	}
 }
 
@@ -791,7 +791,7 @@ func (p *Player) maybeQueueRadio() {
 	p.mu.Unlock()
 
 	if shouldQueue {
-		go p.tryQueueRadioSong()
+		go p.tryQueueRadioSong(false)
 	}
 }
 
@@ -1208,7 +1208,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	if !hasNext {
 		if p.RadioMode && p.NowPlaying != nil {
 			p.mu.Unlock()
-			p.tryQueueRadioSong()
+			p.tryQueueRadioSong(true)
 			return
 		}
 
@@ -1235,7 +1235,8 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 }
 
 // tryQueueRadioSong attempts to find and queue a related song for radio mode.
-func (p *Player) tryQueueRadioSong() {
+// If playAfter is true, it also starts playback (used when called from handlePlaybackEnd).
+func (p *Player) tryQueueRadioSong(playAfter bool) {
 	ctx := context.Background()
 
 	p.mu.Lock()
@@ -1251,7 +1252,9 @@ func (p *Player) tryQueueRadioSong() {
 	related, err := p.FindRelatedSong(ctx, currentSong)
 	if err != nil {
 		slog.Error("radio: failed to find related song", "guildID", p.guildID, "error", err)
-		p.setIdleState()
+		if playAfter {
+			p.setIdleState()
+		}
 		return
 	}
 
@@ -1267,7 +1270,6 @@ func (p *Player) tryQueueRadioSong() {
 	p.addToRadioHistory(related.VideoID)
 	p.SongQueue = append(p.SongQueue, *related)
 	p.RadioQueuedIndex = len(p.SongQueue) - 1
-	p.Qpos++
 
 	session := p.Session
 	textChanID := p.TextChannelID
@@ -1282,8 +1284,10 @@ func (p *Player) tryQueueRadioSong() {
 
 	slog.Info("radio: queued related song", "guildID", p.guildID, "title", related.Title, "artist", related.Artist)
 
-	if err := p.Play(ctx, nil, nil); err != nil {
-		slog.Error("radio: failed to play queued song", "guildID", p.guildID, "error", err)
-		p.setIdleState()
+	if playAfter {
+		if err := p.Play(ctx, nil, nil); err != nil {
+			slog.Error("radio: failed to play queued song", "guildID", p.guildID, "error", err)
+			p.setIdleState()
+		}
 	}
 }
