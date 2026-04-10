@@ -1334,6 +1334,19 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	related, err := p.FindRelatedSong(ctx, currentSong)
 	if err != nil {
 		slog.Error("radio: failed to find related song", "guildID", p.guildID, "error", err)
+
+		p.mu.Lock()
+		session := p.Session
+		textChanID := p.TextChannelID
+		p.mu.Unlock()
+
+		if session != nil && textChanID != "" {
+			embed := BuildRadioFailedEmbed()
+			if _, msgErr := session.ChannelMessageSendEmbed(textChanID, embed); msgErr != nil {
+				slog.Warn("failed to send radio failure embed", "guildID", p.guildID, "err", msgErr)
+			}
+		}
+
 		if playAfter {
 			p.setIdleState()
 		}

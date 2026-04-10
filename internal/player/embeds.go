@@ -278,3 +278,12 @@ func BuildRadioQueuedEmbed(song *SongMetadata) *discordgo.MessageEmbed {
 
 	return embed
 }
+
+// BuildRadioFailedEmbed creates an embed for when radio fails to find a related song.
+func BuildRadioFailedEmbed() *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:       "🔊 Radio Mode",
+		Description: "📻 **Radio** couldn't find a suitable related song. Radio mode has been stopped. Try playing a different song and re-enabling radio.",
+		Color:       0xE74C3C, // Red
+	}
+}
