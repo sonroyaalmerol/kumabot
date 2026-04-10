@@ -237,8 +237,19 @@ func (p *Player) Add(song SongMetadata, immediate bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// If adding a manual song (not radio-suggested), remove any radio-suggested song at the end
+	if !song.IsRadioSuggestion && p.RadioQueuedIndex >= 0 {
+		if p.RadioQueuedIndex < len(p.SongQueue) && p.SongQueue[p.RadioQueuedIndex].IsRadioSuggestion {
+			p.SongQueue = append(p.SongQueue[:p.RadioQueuedIndex], p.SongQueue[p.RadioQueuedIndex+1:]...)
+		}
+		p.RadioQueuedIndex = -1
+	}
+
 	if song.Playlist != nil || !immediate || len(p.SongQueue) == 0 {
 		p.SongQueue = append(p.SongQueue, song)
+		if song.IsRadioSuggestion {
+			p.RadioQueuedIndex = len(p.SongQueue) - 1
+		}
 		return
 	}
 
@@ -251,6 +262,10 @@ func (p *Player) Add(song SongMetadata, immediate bool) {
 	p.SongQueue = append(p.SongQueue, SongMetadata{})      // grow by one
 	copy(p.SongQueue[insertAt+1:], p.SongQueue[insertAt:]) // shift right
 	p.SongQueue[insertAt] = song
+
+	if song.IsRadioSuggestion {
+		p.RadioQueuedIndex = insertAt
+	}
 }
 
 func (p *Player) Clear() {
@@ -263,6 +278,7 @@ func (p *Player) Clear() {
 	}
 	p.SongQueue = newq
 	p.Qpos = 0
+	p.RadioQueuedIndex = -1
 
 	p.lastResolvedURL = ""
 	p.lastVideoID = ""
@@ -563,6 +579,7 @@ func (p *Player) Stop() {
 	p.Qpos = 0
 	p.NowPlaying = nil
 	p.PositionSec = 0
+	p.RadioQueuedIndex = -1
 
 	p.lastResolvedURL = ""
 	p.lastVideoID = ""
