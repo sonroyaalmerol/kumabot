@@ -127,6 +127,7 @@ func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, gu
 		{Name: "loop", Description: "toggle looping the current song"},
 		{Name: "loop-queue", Description: "toggle looping the entire queue"},
 		{Name: "shuffle", Description: "toggle shuffling the entire queue"},
+		{Name: "radio", Description: "toggle radio mode (auto-queue related songs when queue ends)"},
 		{
 			Name:        "move",
 			Description: "move songs within the queue",
@@ -263,6 +264,8 @@ func (h *CommandHandler) handleChatCommand(s *discordgo.Session, i *discordgo.In
 		h.cmdLoopQueue(s, i)
 	case "shuffle":
 		h.cmdShuffle(s, i)
+	case "radio":
+		h.cmdRadio(s, i)
 	case "move":
 		h.cmdMove(s, i)
 	case "next":
@@ -846,6 +849,30 @@ func (h *CommandHandler) cmdShuffle(s *discordgo.Session, i *discordgo.Interacti
 		h.reply(s, i, "shuffled queue :)", false)
 	} else {
 		h.reply(s, i, "stopped shuffling queue :(", false)
+	}
+}
+
+func (h *CommandHandler) cmdRadio(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.reply(s, i, "internal player error", true)
+		slog.Error("radio command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
+		return
+	}
+
+	on := player.ToggleRadioMode()
+	slog.Info("cmd radio", "guildID", i.GuildID, "userID", userIDOf(i), "on", on)
+
+	if on {
+		// Check if we should trigger radio immediately (queue is empty but something was playing)
+		go func() {
+			if player.QueueSize() == 0 && player.GetCurrent() != nil {
+				player.TryStartRadio()
+			}
+		}()
+		h.reply(s, i, "📻 Radio mode enabled! I'll automatically queue related songs when the queue ends.", false)
+	} else {
+		h.reply(s, i, "📻 Radio mode disabled. I'll stop auto-queuing songs.", false)
 	}
 }
 
