@@ -13,18 +13,19 @@ type QueuedPlaylist struct {
 }
 
 type SongMetadata struct {
-	Title       string
-	Artist      string
-	VideoID     string
-	URL         string // youtube videoId or full HLS URL
-	Length      int    // seconds
-	Offset      int    // seconds to start
-	Playlist    *QueuedPlaylist
-	IsLive      bool
-	Thumbnail   string
-	Source      MediaSource
-	RequestedBy string
-	AddedInChan string
+	Title             string
+	Artist            string
+	VideoID           string
+	URL               string // youtube videoId or full HLS URL
+	Length            int    // seconds
+	Offset            int    // seconds to start
+	Playlist          *QueuedPlaylist
+	IsLive            bool
+	Thumbnail         string
+	Source            MediaSource
+	RequestedBy       string
+	AddedInChan       string
+	IsRadioSuggestion bool // true if queued by radio feature
 }
 
 type PlayerStatus int
