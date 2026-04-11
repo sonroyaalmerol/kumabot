@@ -46,6 +46,7 @@ type Player struct {
 	NowPlaying      *SongMetadata
 	PositionSec     int
 	DefaultVol      int
+	Volume          int // current playback volume 0-150
 	LoopSong        bool
 	LoopQueue       bool
 	ShuffleMode     bool
@@ -88,6 +89,7 @@ func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache
 		guildID:          guildID,
 		Status:           StatusIdle,
 		DefaultVol:       DefaultVolume,
+		Volume:           DefaultVolume,
 		RadioQueuedIndex: -1,
 		RadioHistory:     make([]radioHistoryEntry, 0),
 	}
@@ -103,6 +105,24 @@ func (p *Player) SetSearching(s bool) {
 	} else {
 		p.ongoingSearchQueue.Add(-1)
 	}
+}
+
+// MuLock/MuUnlock expose the mutex for component handlers that need atomic state reads.
+func (p *Player) MuLock()   { p.mu.Lock() }
+func (p *Player) MuUnlock() { p.mu.Unlock() }
+
+// StatusPub returns the current player status.
+func (p *Player) StatusPub() PlayerStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Status
+}
+
+// LoopSongPub returns the loop song state.
+func (p *Player) LoopSongPub() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.LoopSong
 }
 
 // newOpCtx cancels any previous in-flight operation and creates a fresh context.
@@ -202,6 +222,7 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID
 	p.TextChannelID = textChannelID
 	p.ConnChannelID = channelID
 	p.DefaultVol = defVol
+	p.Volume = defVol
 	// any pending idle disconnect for previous state should be canceled
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
@@ -554,7 +575,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 	// Start sender loop
 	go p.sendLoop(vc, i, cur, pos, sess)
-	go p.sendNowPlayingEmbed()
+	go p.SendNowPlayingEmbed()
 	go p.startEmbedUpdater(sess.ctx)
 
 	// Check if we should pre-queue a radio song
@@ -563,7 +584,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	return nil
 }
 
-func (p *Player) sendNowPlayingEmbed() {
+func (p *Player) SendNowPlayingEmbed() {
 	p.mu.Lock()
 	s := p.Session
 	textChanID := p.TextChannelID
@@ -580,14 +601,20 @@ func (p *Player) sendNowPlayingEmbed() {
 	}
 
 	embed := BuildPlayingEmbed(p)
+	components := PlayingComponents(p)
 
 	// Try to edit the existing embed in place
 	if existingMsg != nil {
-		_, err := s.ChannelMessageEditEmbed(textChanID, existingMsg.ID, embed)
+		_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel:    textChanID,
+			ID:         existingMsg.ID,
+			Embeds:     &[]*discordgo.MessageEmbed{embed},
+			Components: &components,
+		})
 		if err == nil {
 			return
 		}
-		// Edit failed (message deleted, etc.) — fall through to send new
+		// Edit failed (message deleted, etc.) - fall through to send new
 	}
 
 	// Scan recent messages for old now-playing embeds to clean up.
@@ -595,7 +622,10 @@ func (p *Player) sendNowPlayingEmbed() {
 	// lastEmbedMessage is nil but stale embeds exist in channel history.
 	p.cleanOldEmbeds(s, textChanID, botID)
 
-	newMsg, err := s.ChannelMessageSendEmbed(textChanID, embed)
+	newMsg, err := s.ChannelMessageSendComplex(textChanID, &discordgo.MessageSend{
+		Embeds:     []*discordgo.MessageEmbed{embed},
+		Components: components,
+	})
 	if err != nil {
 		slog.Warn("failed to send now-playing embed", "guildID", guildID, "err", err)
 		return
@@ -646,7 +676,7 @@ func (p *Player) startEmbedUpdater(ctx context.Context) {
 			if !playing {
 				return
 			}
-			p.sendNowPlayingEmbed()
+			p.SendNowPlayingEmbed()
 		case <-statusTicker.C:
 			p.mu.Lock()
 			playing := p.Status == StatusPlaying
@@ -654,14 +684,14 @@ func (p *Player) startEmbedUpdater(ctx context.Context) {
 			if !playing {
 				return
 			}
-			p.updateVoiceChannelStatus()
+			p.UpdateVoiceChannelStatus()
 		}
 	}
 }
 
 // updateVoiceChannelStatus sets the voice channel status text showing current song + progress.
 // This is always visible at the top of the voice channel without scrolling through chat.
-func (p *Player) updateVoiceChannelStatus() {
+func (p *Player) UpdateVoiceChannelStatus() {
 	p.mu.Lock()
 	s := p.Session
 	channelID := p.ConnChannelID
@@ -918,6 +948,25 @@ func (p *Player) ShuffleOff() bool {
 	return p.ShuffleMode
 }
 
+func (p *Player) SetVolume(vol int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if vol < 0 {
+		vol = 0
+	}
+	if vol > 150 {
+		vol = 150
+	}
+	p.Volume = vol
+	return vol
+}
+
+func (p *Player) GetVolume() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Volume
+}
+
 // ToggleRadioMode toggles radio mode on/off. Returns the new state.
 func (p *Player) ToggleRadioMode() bool {
 	p.mu.Lock()
@@ -1134,6 +1183,17 @@ func (p *Player) cancelIdleDisconnectLocked() {
 	}
 }
 
+// applyVolumeS16LE scales S16LE PCM samples by vol/100 in-place.
+func applyVolumeS16LE(pcm []byte, vol int) {
+	factor := float32(vol) / 100.0
+	for i := 0; i+1 < len(pcm); i += 2 {
+		s := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8)
+		s = int16(float32(s) * factor)
+		pcm[i] = byte(uint16(s))
+		pcm[i+1] = byte(uint16(s) >> 8)
+	}
+}
+
 func isVoiceReady(vc *discordgo.VoiceConnection) bool {
 	if vc == nil {
 		return false
@@ -1238,6 +1298,14 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		}
 
 		copy(framePCM, f.data)
+
+		// Apply volume scaling (S16LE samples)
+		p.mu.Lock()
+		vol := p.Volume
+		p.mu.Unlock()
+		if vol != 100 {
+			applyVolumeS16LE(framePCM, vol)
+		}
 
 		outPkt = outPkt[:0]
 		if err := sess.enc.EncodeFrame(framePCM, func(pkt []byte) error {
@@ -1477,7 +1545,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	related, err := p.FindRelatedSong(ctx, currentSong)
 	if err != nil {
 		slog.Error("radio: failed to find related song", "guildID", p.guildID, "error", err)
-		p.sendNowPlayingEmbed()
+		p.SendNowPlayingEmbed()
 		if playAfter {
 			p.setIdleState()
 		}
@@ -1499,7 +1567,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 
 	p.mu.Unlock()
 
-	p.sendNowPlayingEmbed()
+	p.SendNowPlayingEmbed()
 
 	slog.Info("radio: queued related song", "guildID", p.guildID, "title", related.Title, "artist", related.Artist)
 

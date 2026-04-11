@@ -19,13 +19,15 @@ type Bot struct {
 	cache *cache.FileCache
 	pm    *player.PlayerManager
 	cmd   *CommandHandler
+	comp  *ComponentHandler
 }
 
 func NewBot(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache) *Bot {
 	pm := player.NewPlayerManager()
 	cmd := NewCommandHandler(cfg, repo, cache, pm, repository.NewFavoritesService(repo))
+	comp := NewComponentHandler(cfg, repo, cache, pm)
 	return &Bot{
-		cfg: cfg, repo: repo, cache: cache, pm: pm, cmd: cmd,
+		cfg: cfg, repo: repo, cache: cache, pm: pm, cmd: cmd, comp: comp,
 	}
 }
 
@@ -94,6 +96,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	})
 
 	dg.AddHandler(b.cmd.HandleInteraction)
+	dg.AddHandler(b.comp.Handle)
 
 	dg.AddHandler(func(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		gid := vs.GuildID

@@ -144,6 +144,29 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 	return embed
 }
 
+// PlayingComponents returns the playback control button row for the now-playing embed.
+func PlayingComponents(p *Player) []discordgo.MessageComponent {
+	pauseLabel := "Pause"
+	if p.StatusPub() != StatusPlaying {
+		pauseLabel = "Resume"
+	}
+	loopStyle := discordgo.SecondaryButton
+	if p.LoopSongPub() {
+		loopStyle = discordgo.PrimaryButton
+	}
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "⏮", Style: discordgo.SecondaryButton, CustomID: "kuma:prev"},
+				discordgo.Button{Label: pauseLabel, Style: discordgo.PrimaryButton, CustomID: "kuma:pause"},
+				discordgo.Button{Label: "⏭", Style: discordgo.SecondaryButton, CustomID: "kuma:next"},
+				discordgo.Button{Label: "🔁", Style: loopStyle, CustomID: "kuma:loop"},
+				discordgo.Button{Label: "⏹", Style: discordgo.DangerButton, CustomID: "kuma:stop"},
+			},
+		},
+	}
+}
+
 func BuildQueueEmbed(
 	p *Player,
 	page int,
@@ -293,6 +316,34 @@ func BuildQueueEmbed(
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: cur.Thumbnail}
 	}
 	return embed, nil
+}
+
+// QueueComponents returns prev/next page buttons for the queue embed.
+// It uses the embed footer text to determine if there are more pages.
+func QueueComponents(currentPage int, embed *discordgo.MessageEmbed) []discordgo.MessageComponent {
+	hasPrev := currentPage > 1
+	hasNext := false
+	if embed != nil {
+		for _, f := range embed.Fields {
+			if f.Name == "Page" {
+				var cur, max int
+				if _, err := fmt.Sscanf(f.Value, "%d out of %d", &cur, &max); err == nil {
+					hasNext = cur < max
+				}
+			}
+		}
+	}
+	if !hasPrev && !hasNext {
+		return nil
+	}
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "◀ Prev", Style: discordgo.SecondaryButton, CustomID: "kuma:qprev", Disabled: !hasPrev},
+				discordgo.Button{Label: "Next ▶", Style: discordgo.SecondaryButton, CustomID: "kuma:qnext", Disabled: !hasNext},
+			},
+		},
+	}
 }
 
 func queueInfo(p *Player) string {
