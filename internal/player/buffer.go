@@ -29,7 +29,7 @@ func newOpusBuffer(maxPackets int) *opusBuffer {
 		packets: make([]bufferedPacket, maxPackets),
 		maxSize: maxPackets,
 		pool: sync.Pool{
-			New: func() any { return make([]byte, 0, 128) },
+			New: func() any { return make([]byte, 0, 200) },
 		},
 	}
 	ob.notEmpty = sync.NewCond(&ob.mu)
@@ -81,7 +81,7 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 		used := (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
 		if used > 0 {
 			pkt := ob.packets[ob.readPos]
-			ob.packets[ob.readPos] = bufferedPacket{} // clear slot, keep data alive for caller
+			ob.packets[ob.readPos] = bufferedPacket{}
 			ob.readPos = (ob.readPos + 1) % ob.maxSize
 			return pkt, true
 		}
@@ -91,6 +91,13 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 		}
 
 		ob.notEmpty.Wait()
+	}
+}
+
+// Release returns a packet's data buffer to the pool for reuse.
+func (ob *opusBuffer) Release(data []byte) {
+	if data != nil {
+		ob.pool.Put(data[:0])
 	}
 }
 

@@ -1249,11 +1249,13 @@ func (p *Player) consumePackets(
 
 		select {
 		case <-sess.ctx.Done():
+			sess.buf.Release(pkt.data)
 			return
 		case vc.OpusSend <- pkt.data:
 			updatePosition(pkt.pts48)
 			droppedCount = 0
 		case <-time.After(200 * time.Millisecond):
+			sess.buf.Release(pkt.data)
 			droppedCount++
 			slog.Debug("dropped packet",
 				"guildID", p.guildID,
