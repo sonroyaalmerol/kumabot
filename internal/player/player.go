@@ -30,6 +30,9 @@ type Player struct {
 	guildID string
 	onRemove func() // called when player is fully disconnected
 
+	opCtx    context.Context
+	opCancel context.CancelFunc // cancels in-flight yt-dlp/radio operations
+
 	mu            sync.Mutex
 	Conn          *discordgo.VoiceConnection
 	Session       *discordgo.Session
@@ -98,6 +101,27 @@ func (p *Player) SetSearching(s bool) {
 		p.ongoingSearchQueue.Add(1)
 	} else {
 		p.ongoingSearchQueue.Add(-1)
+	}
+}
+
+// newOpCtx cancels any previous in-flight operation and creates a fresh context.
+func (p *Player) newOpCtx(parent context.Context) context.Context {
+	p.mu.Lock()
+	if p.opCancel != nil {
+		p.opCancel()
+	}
+	p.opCtx, p.opCancel = context.WithCancel(parent)
+	ctx := p.opCtx
+	p.mu.Unlock()
+	return ctx
+}
+
+// cancelOps cancels any in-flight operation context. Caller must hold p.mu.
+func (p *Player) cancelOpsLocked() {
+	if p.opCancel != nil {
+		p.opCancel()
+		p.opCancel = nil
+		p.opCtx = nil
 	}
 }
 
@@ -217,8 +241,9 @@ func (p *Player) safeDisconnect(vc *discordgo.VoiceConnection) error {
 
 func (p *Player) Disconnect() {
 	p.mu.Lock()
-	// stop any playback
+	// stop any playback and cancel in-flight operations
 	p.stopPlayLocked()
+	p.cancelOpsLocked()
 
 	p.Status = StatusIdle
 	p.NowPlaying = nil
@@ -431,6 +456,8 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
+	opCtx := p.newOpCtx(ctx)
+
 	// Resolve input URL without holding the lock
 	inputURL := ""
 	if cur.Source == SourceHLS {
@@ -450,7 +477,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 			p.mu.Unlock()
 
 			if !canReuse {
-				info, err := stream.YtdlpGetInfo(ctx, p.cfg, ytURL)
+				info, err := stream.YtdlpGetInfoWithTimeout(opCtx, p.cfg, ytURL, stream.DefaultInfoTimeout)
 				if err != nil {
 					return err
 				}
@@ -595,6 +622,7 @@ func (p *Player) Pause() error {
 func (p *Player) Stop() {
 	p.mu.Lock()
 	p.stopPlayLocked()
+	p.cancelOpsLocked()
 
 	p.Status = StatusIdle
 	p.SongQueue = nil
@@ -1318,15 +1346,21 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 // tryQueueRadioSong attempts to find and queue a related song for radio mode.
 // If playAfter is true, it also starts playback (used when called from handlePlaybackEnd).
 func (p *Player) tryQueueRadioSong(playAfter bool) {
-	ctx := context.Background()
-
 	p.mu.Lock()
 	if !p.RadioMode || p.NowPlaying == nil {
 		p.mu.Unlock()
 		return
 	}
 	currentSong := *p.NowPlaying
+	ctx := p.opCtx
 	p.mu.Unlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	slog.Info("radio: searching for related song", "guildID", p.guildID, "current", currentSong.Title)
 

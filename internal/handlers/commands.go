@@ -364,6 +364,17 @@ func (h *CommandHandler) editReply(s *discordgo.Session, i *discordgo.Interactio
 	}
 }
 
+func (h *CommandHandler) progressUpdater(s *discordgo.Session, i *discordgo.InteractionCreate) plib.ProgressFunc {
+	var lastEdit time.Time
+	return func(msg string) {
+		if time.Since(lastEdit) < 2*time.Second {
+			return
+		}
+		lastEdit = time.Now()
+		h.editReply(s, i, msg)
+	}
+}
+
 func userInVoice(s *discordgo.Session, guildID, userID string) (channelID string, ok bool) {
 	g, _ := s.State.Guild(guildID)
 	if g == nil {
@@ -433,7 +444,8 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	player.SetSearching(true)
 	defer player.SetSearching(false)
 
-	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split)
+	progress := h.progressUpdater(s, i)
+	streamCh := plib.ResolveQueryStream(ctx, h.cfg, query, set.PlaylistLimit, split, progress)
 
 	var firstSongTitle string
 	var infoMsg string
@@ -621,6 +633,7 @@ func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 	h.deferReply(s, i, false)
+	h.editReply(s, i, "Seeking...")
 	if err := player.Seek(context.Background(), s, i, newPos); err != nil {
 		slog.Warn("fseek failed", "guildID", i.GuildID, "userID", userIDOf(i), "deltaSec", sec, "err", err)
 		h.editReply(s, i, fmt.Sprintf("seek failed: %v", err))
@@ -925,6 +938,7 @@ func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 	h.deferReply(s, i, false)
+	h.editReply(s, i, "Skipping...")
 	if err := player.Next(context.Background(), s, i); err != nil {
 		slog.Warn("next failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.editReply(s, i, fmt.Sprintf("failed to skip: %v", err))
@@ -1037,6 +1051,7 @@ func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.Interactio
 		return
 	}
 	h.deferReply(s, i, false)
+	h.editReply(s, i, "Replaying...")
 	if err := player.Replay(context.Background(), s, i); err != nil {
 		slog.Warn("replay failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.editReply(s, i, fmt.Sprintf("replay failed: %v", err))
@@ -1064,6 +1079,7 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 		return
 	}
 	h.deferReply(s, i, false)
+	h.editReply(s, i, "Resuming...")
 	if err := player.Resume(context.Background(), s, i); err != nil {
 		slog.Warn("resume failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.editReply(s, i, fmt.Sprintf("resume failed: %v", err))
@@ -1081,6 +1097,7 @@ func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.Interactio
 		return
 	}
 	h.deferReply(s, i, false)
+	h.editReply(s, i, "Going back...")
 	if err := player.Back(context.Background(), s, i); err != nil {
 		slog.Warn("unskip/back failed", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
 		h.editReply(s, i, fmt.Sprintf("can't go back: %v", err))

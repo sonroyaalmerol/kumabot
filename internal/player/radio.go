@@ -377,7 +377,7 @@ func (p *Player) buildSearchQueries(current SongMetadata) []string {
 
 // fetchYouTubeRelated uses YouTube's auto-generated RD playlist to get related videos.
 func (p *Player) fetchYouTubeRelated(ctx context.Context, videoID string) ([]*SongMetadata, error) {
-	entries, err := stream.YtdlpGetRelated(ctx, p.cfg, videoID, radioRelatedCount)
+	entries, err := stream.YtdlpGetRelatedWithTimeout(ctx, p.cfg, videoID, radioRelatedCount, stream.DefaultRelatedTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +402,7 @@ func (p *Player) fetchYouTubeRelated(ctx context.Context, videoID string) ([]*So
 
 // searchYouTube performs a YouTube search and returns results as SongMetadata.
 func (p *Player) searchYouTube(ctx context.Context, query string) ([]*SongMetadata, error) {
-	info, err := stream.YtdlpGetInfo(ctx, p.cfg, query)
+	info, err := stream.YtdlpGetInfoWithTimeout(ctx, p.cfg, query, stream.DefaultInfoTimeout)
 	if err != nil {
 		return nil, err
 	}

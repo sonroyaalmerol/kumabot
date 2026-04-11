@@ -19,12 +19,22 @@ type ResolveEvent struct {
 	Err  error
 }
 
+// ProgressFunc is called to update the user on resolution progress.
+type ProgressFunc func(msg string)
+
+func (fn ProgressFunc) update(msg string) {
+	if fn != nil {
+		fn(msg)
+	}
+}
+
 func ResolveQueryStream(
 	ctx context.Context,
 	cfg *config.Config,
 	query string,
 	playlistLimit int,
 	split bool,
+	progress ProgressFunc,
 ) <-chan ResolveEvent {
 	ch := make(chan ResolveEvent, 8)
 
@@ -58,7 +68,7 @@ func ResolveQueryStream(
 						ch <- ResolveEvent{Err: err}
 						return
 					}
-					streamSpotifyTracks(ctx, cfg, tracks, &QueuedPlaylist{Title: qp.Title, Source: qp.Source}, playlistLimit, split, ch)
+					streamSpotifyTracks(ctx, cfg, tracks, &QueuedPlaylist{Title: qp.Title, Source: qp.Source}, playlistLimit, split, ch, progress)
 					return
 
 				case "playlist":
@@ -70,7 +80,7 @@ func ResolveQueryStream(
 					if playlistLimit > 0 && len(tracks) > playlistLimit {
 						ch <- ResolveEvent{Info: fmt.Sprintf("a random sample of %d songs was taken", playlistLimit)}
 					}
-					streamSpotifyTracks(ctx, cfg, tracks, &QueuedPlaylist{Title: qp.Title, Source: qp.Source}, playlistLimit, split, ch)
+					streamSpotifyTracks(ctx, cfg, tracks, &QueuedPlaylist{Title: qp.Title, Source: qp.Source}, playlistLimit, split, ch, progress)
 					return
 
 				case "track":
@@ -79,7 +89,7 @@ func ResolveQueryStream(
 						ch <- ResolveEvent{Err: err}
 						return
 					}
-					streamSpotifyTracks(ctx, cfg, []spotify.Track{t}, nil, 1, split, ch)
+					streamSpotifyTracks(ctx, cfg, []spotify.Track{t}, nil, 1, split, ch, progress)
 					return
 
 				case "artist":
@@ -88,7 +98,7 @@ func ResolveQueryStream(
 						ch <- ResolveEvent{Err: err}
 						return
 					}
-					streamSpotifyTracks(ctx, cfg, tracks, nil, playlistLimit, split, ch)
+					streamSpotifyTracks(ctx, cfg, tracks, nil, playlistLimit, split, ch, progress)
 					return
 
 				default:
@@ -100,6 +110,7 @@ func ResolveQueryStream(
 			// YouTube playlist
 			if strings.Contains(q, "youtube.com") || strings.Contains(q, "youtu.be") || strings.Contains(q, "music.youtube.") {
 				if strings.Contains(q, "list=") {
+					progress.update("Loading playlist...")
 					infos, err := stream.YtdlpPlaylist(ctx, cfg, q)
 					if err != nil || len(infos) == 0 {
 						ch <- ResolveEvent{Err: fmt.Errorf("not found")}
@@ -111,14 +122,17 @@ func ResolveQueryStream(
 						ch <- ResolveEvent{Info: fmt.Sprintf("a random sample of %d songs was taken", playlistLimit)}
 					}
 					// resolve each entry incrementally
-					for _, e := range infos {
+					for idx, e := range infos {
+					if idx%5 == 0 {
+						progress.update(fmt.Sprintf("Resolving track %d/%d...", idx+1, len(infos)))
+					}
 						select {
 						case <-ctx.Done():
 							return
 						default:
 						}
 						// fetch full info to get streamable URL and description
-						info, err := stream.YtdlpGetInfo(ctx, cfg, "https://www.youtube.com/watch?v="+e.Id)
+						info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, "https://www.youtube.com/watch?v="+e.Id, stream.DefaultInfoTimeout)
 						if err != nil || info == nil {
 							ch <- ResolveEvent{Err: fmt.Errorf("failed to get info for %s", e.Id)}
 							continue
@@ -133,7 +147,8 @@ func ResolveQueryStream(
 				}
 
 				// single YouTube item
-				info, err := stream.YtdlpGetInfo(ctx, cfg, q)
+				progress.update("Loading stream...")
+				info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, q, stream.DefaultInfoTimeout)
 				if err != nil {
 					ch <- ResolveEvent{Err: err}
 					return
@@ -162,7 +177,8 @@ func ResolveQueryStream(
 		}
 
 		// Not a URL => YouTube search
-		info, err := stream.YtdlpGetInfo(ctx, cfg, "ytsearch1:"+q)
+		progress.update("Searching YouTube...")
+		info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, "ytsearch1:"+q, stream.DefaultInfoTimeout)
 		if err != nil {
 			ch <- ResolveEvent{Err: err}
 			return
@@ -186,6 +202,7 @@ func streamSpotifyTracks(
 	playlistLimit int,
 	split bool,
 	ch chan<- ResolveEvent,
+	progress ProgressFunc,
 ) {
 	if len(tracks) == 0 {
 		return
@@ -195,6 +212,7 @@ func streamSpotifyTracks(
 		tracks = tracks[:playlistLimit]
 	}
 
+	progress.update(fmt.Sprintf("Resolving %d Spotify tracks...", len(tracks)))
 	for _, t := range tracks {
 		select {
 		case <-ctx.Done():
@@ -202,7 +220,7 @@ func streamSpotifyTracks(
 		default:
 		}
 		q := fmt.Sprintf(`ytsearch1:"%s" "%s"`, t.Name, t.Artist)
-		info, err := stream.YtdlpGetInfo(ctx, cfg, q)
+		info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, q, stream.DefaultInfoTimeout)
 		if err != nil || info == nil {
 			ch <- ResolveEvent{Err: fmt.Errorf("not found: %s - %s", t.Artist, t.Name)}
 			continue
@@ -269,7 +287,7 @@ func spotifyTracksToYouTube(
 
 	for _, t := range tracks {
 		q := fmt.Sprintf(`ytsearch1:"%s" "%s"`, t.Name, t.Artist)
-		info, err := stream.YtdlpGetInfo(ctx, cfg, q)
+		info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, q, stream.DefaultInfoTimeout)
 		if err != nil || info == nil {
 			notFound++
 			continue

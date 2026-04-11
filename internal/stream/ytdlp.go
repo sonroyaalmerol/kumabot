@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	ytdlp "github.com/lrstanley/go-ytdlp"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
@@ -369,4 +370,37 @@ func isLikelyMediaURL(u string) bool {
 	}
 	// Some direct audio URLs lack extensions; accept as fallback if not manifest
 	return !isManifestURL(lu)
+}
+
+const (
+	DefaultInfoTimeout    = 30 * time.Second
+	DefaultRelatedTimeout = 45 * time.Second
+)
+
+// YtdlpGetInfoWithTimeout calls YtdlpGetInfo with a timeout and one retry on failure.
+func YtdlpGetInfoWithTimeout(ctx context.Context, cfg *config.Config, url string, timeout time.Duration) (*YTDLPInfo, error) {
+	ctx1, cancel1 := context.WithTimeout(ctx, timeout)
+	defer cancel1()
+	info, err := YtdlpGetInfo(ctx1, cfg, url)
+	if err == nil {
+		return info, nil
+	}
+	ytdlpDebugf("yt-dlp info attempt 1 failed for %s: %v, retrying...", url, err)
+	ctx2, cancel2 := context.WithTimeout(ctx, timeout)
+	defer cancel2()
+	return YtdlpGetInfo(ctx2, cfg, url)
+}
+
+// YtdlpGetRelatedWithTimeout calls YtdlpGetRelated with a timeout and one retry on failure.
+func YtdlpGetRelatedWithTimeout(ctx context.Context, cfg *config.Config, videoID string, limit int, timeout time.Duration) ([]YTDLPEntry, error) {
+	ctx1, cancel1 := context.WithTimeout(ctx, timeout)
+	defer cancel1()
+	entries, err := YtdlpGetRelated(ctx1, cfg, videoID, limit)
+	if err == nil {
+		return entries, nil
+	}
+	ytdlpDebugf("yt-dlp related attempt 1 failed for %s: %v, retrying...", videoID, err)
+	ctx2, cancel2 := context.WithTimeout(ctx, timeout)
+	defer cancel2()
+	return YtdlpGetRelated(ctx2, cfg, videoID, limit)
 }
