@@ -572,10 +572,21 @@ func (p *Player) sendNowPlayingEmbed() {
 
 	embed := BuildPlayingEmbed(p)
 
+	// Try to edit the existing embed in place
 	if existingMsg != nil {
 		_, err := s.ChannelMessageEditEmbed(textChanID, existingMsg.ID, embed)
 		if err == nil {
 			return
+		}
+		// Edit failed (message deleted, etc.) — fall through to send new
+	}
+
+	// Check if the existing embed is still the latest message in the channel.
+	// If other messages were sent after it, delete the old embed to avoid clutter.
+	if existingMsg != nil {
+		msgs, err := s.ChannelMessages(textChanID, 1, "", "", "")
+		if err == nil && len(msgs) > 0 && msgs[0].ID != existingMsg.ID {
+			_ = s.ChannelMessageDelete(textChanID, existingMsg.ID)
 		}
 	}
 
@@ -825,21 +836,6 @@ func (p *Player) IsRadioMode() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.RadioMode
-}
-
-// sendTextEmbed sends an embed to the player's text channel. Safe to call without holding p.mu.
-func (p *Player) sendTextEmbed(embed *discordgo.MessageEmbed) {
-	p.mu.Lock()
-	s := p.Session
-	ch := p.TextChannelID
-	p.mu.Unlock()
-
-	if s == nil || ch == "" {
-		return
-	}
-	if _, err := s.ChannelMessageSendEmbed(ch, embed); err != nil {
-		slog.Warn("failed to send embed", "guildID", p.guildID, "err", err)
-	}
 }
 
 // TryStartRadio attempts to start radio playback if conditions are met.
@@ -1386,7 +1382,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	related, err := p.FindRelatedSong(ctx, currentSong)
 	if err != nil {
 		slog.Error("radio: failed to find related song", "guildID", p.guildID, "error", err)
-		p.sendTextEmbed(BuildRadioFailedEmbed())
+		p.sendNowPlayingEmbed()
 		if playAfter {
 			p.setIdleState()
 		}
@@ -1408,7 +1404,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 
 	p.mu.Unlock()
 
-	p.sendTextEmbed(BuildRadioQueuedEmbed(related))
+	p.sendNowPlayingEmbed()
 
 	slog.Info("radio: queued related song", "guildID", p.guildID, "title", related.Title, "artist", related.Artist)
 
