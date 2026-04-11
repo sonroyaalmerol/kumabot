@@ -272,13 +272,17 @@ func (p *Player) Disconnect() {
 	}
 }
 
-func (p *Player) Add(song SongMetadata, immediate bool) {
+func (p *Player) Add(song SongMetadata, immediate bool) *SongMetadata {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	var replaced *SongMetadata
 
 	// If adding a manual song (not radio-suggested), remove any radio-suggested song at the end
 	if !song.IsRadioSuggestion && p.RadioQueuedIndex >= 0 {
 		if p.RadioQueuedIndex < len(p.SongQueue) && p.SongQueue[p.RadioQueuedIndex].IsRadioSuggestion {
+			removed := p.SongQueue[p.RadioQueuedIndex]
+			replaced = &removed
 			p.SongQueue = append(p.SongQueue[:p.RadioQueuedIndex], p.SongQueue[p.RadioQueuedIndex+1:]...)
 		}
 		p.RadioQueuedIndex = -1
@@ -289,7 +293,7 @@ func (p *Player) Add(song SongMetadata, immediate bool) {
 		if song.IsRadioSuggestion {
 			p.RadioQueuedIndex = len(p.SongQueue) - 1
 		}
-		return
+		return replaced
 	}
 
 	insertAt := max(p.Qpos+1, 0)
@@ -305,6 +309,7 @@ func (p *Player) Add(song SongMetadata, immediate bool) {
 	if song.IsRadioSuggestion {
 		p.RadioQueuedIndex = insertAt
 	}
+	return replaced
 }
 
 func (p *Player) Clear() {
@@ -847,9 +852,9 @@ func (p *Player) TryStartRadio() {
 }
 
 // maybeQueueRadio checks if we should pre-queue a radio song and does so in the background.
-// Called when starting playback of a song.
+// Called when starting playback of a song. Only queues when the current song is the last in queue.
 func (p *Player) maybeQueueRadio() {
-	p.startRadioSearch(false, false)
+	p.startRadioSearch(true, false)
 }
 
 // startRadioSearch checks conditions and launches a background radio search.

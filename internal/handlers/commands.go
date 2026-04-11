@@ -449,6 +449,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	var firstSongTitle string
 	var infoMsg string
+	var replacedRadio *plib.SongMetadata
 	count := 0
 	firstSongProcessed := false
 
@@ -462,7 +463,9 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 			ev.Song.RequestedBy = memberID
 			ev.Song.AddedInChan = i.ChannelID
 
-			player.Add(ev.Song, immediate)
+			if replaced := player.Add(ev.Song, immediate); replaced != nil {
+				replacedRadio = replaced
+			}
 
 			if !firstSongProcessed {
 				firstSongProcessed = true
@@ -499,7 +502,10 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 	if shuffleRequested {
 		msg += " (Shuffle Mode active)"
 	}
-	if infoMsg != "" {
+	if replacedRadio != nil {
+		escapedRadio := utils.EscapeMd(replacedRadio.Title)
+		msg += fmt.Sprintf(" (replaced radio suggestion: **%s**)", escapedRadio)
+	} else if infoMsg != "" {
 		msg += " (" + infoMsg + ")"
 	}
 
