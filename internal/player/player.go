@@ -1090,26 +1090,6 @@ func (p *Player) sendLoop(
 	sess.producerWg.Add(1)
 	go p.producePackets(sess, startPos)
 
-	sess.producerWg.Add(1)
-	go func() {
-		defer sess.producerWg.Done()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-sess.ctx.Done():
-				return
-			case <-ticker.C:
-				count := sess.buf.BufferedCount()
-				slog.Debug("buffer health",
-					"buffered", count,
-					"max", sess.buf.maxSize,
-					"guildID", p.guildID)
-			}
-		}
-	}()
-
 	// Consumer: send buffered packets
 	p.consumePackets(vc, sess, startPos, i)
 }
@@ -1126,6 +1106,7 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 	r := bufio.NewReaderSize(sess.pcm.Stdout(), 128*1024)
 	framePCM := make([]byte, sess.enc.FrameBytes())
 	readBuf := make([]byte, 0, sess.enc.FrameBytes())
+	var outPkt []byte // reused across frames to avoid per-frame heap allocation
 
 	var wall0 time.Time
 	var media0 int64
@@ -1162,9 +1143,9 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 
 		copy(framePCM, f.data)
 
-		var outPkt []byte
+		outPkt = outPkt[:0]
 		if err := sess.enc.EncodeFrame(framePCM, func(pkt []byte) error {
-			outPkt = append(outPkt[:0], pkt...)
+			outPkt = append(outPkt, pkt...)
 			return nil
 		}); err != nil {
 			return
