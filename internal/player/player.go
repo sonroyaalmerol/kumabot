@@ -1298,6 +1298,19 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	} else {
 		p.Qpos++
 		hasNext = p.Qpos < len(p.SongQueue)
+		// Compact: trim already-played songs to prevent unbounded queue growth
+		// (especially important during radio mode which runs indefinitely).
+		if p.Qpos > 32 {
+			trimmed := p.Qpos
+			p.SongQueue = p.SongQueue[trimmed:]
+			p.Qpos = 0
+			if p.RadioQueuedIndex >= 0 {
+				p.RadioQueuedIndex -= trimmed
+				if p.RadioQueuedIndex < 0 {
+					p.RadioQueuedIndex = -1
+				}
+			}
+		}
 	}
 
 	// If no next song, wait for any in-flight background radio search before giving up.

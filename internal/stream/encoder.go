@@ -40,8 +40,13 @@ func (p *typedEncoderPool) Put(e *Encoder) {
 // GetPooledEncoder returns an Opus encoder from the pool (or creates a new one).
 func GetPooledEncoder() (*Encoder, error) { return encoderPool.Get() }
 
-// PutPooledEncoder returns an encoder to the pool for reuse.
-func PutPooledEncoder(e *Encoder) { encoderPool.Put(e) }
+// PutPooledEncoder flushes any remaining codec state and returns the encoder to the pool.
+func PutPooledEncoder(e *Encoder) {
+	// Drain any buffered frames in the codec context to prevent stale audio
+	// bleeding into the next song that reuses this encoder.
+	_ = e.Flush(func(pkt []byte) error { return nil })
+	encoderPool.Put(e)
+}
 
 type Encoder struct {
 	cc         *astiav.CodecContext
