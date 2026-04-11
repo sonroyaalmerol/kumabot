@@ -164,6 +164,10 @@ func PlayingComponents(p *Player) []discordgo.MessageComponent {
 				discordgo.Button{Label: "⏮", Style: discordgo.SecondaryButton, CustomID: "kuma:prev"},
 				discordgo.Button{Label: pauseLabel, Style: discordgo.PrimaryButton, CustomID: "kuma:pause"},
 				discordgo.Button{Label: "⏭", Style: discordgo.SecondaryButton, CustomID: "kuma:next"},
+			},
+		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
 				discordgo.Button{Label: "🔁", Style: loopStyle, CustomID: "kuma:loop"},
 				discordgo.Button{Label: "📻", Style: radioStyle, CustomID: "kuma:radio"},
 				discordgo.Button{Label: "⏹", Style: discordgo.DangerButton, CustomID: "kuma:stop"},
