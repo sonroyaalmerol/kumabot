@@ -28,6 +28,7 @@ type Player struct {
 	repo    *repository.Repo
 	cache   *cache.FileCache
 	guildID string
+	onRemove func() // called when player is fully disconnected
 
 	mu            sync.Mutex
 	Conn          *discordgo.VoiceConnection
@@ -155,7 +156,7 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID
 
 	// This prevents the panic in Kill() when channels are closed
 	if vc.OpusSend == nil {
-		vc.OpusSend = make(chan []byte, 2)
+		vc.OpusSend = make(chan []byte, 64)
 	}
 	if vc.OpusRecv == nil {
 		vc.OpusRecv = make(chan *discordgo.Packet, 2)
@@ -199,7 +200,7 @@ func (p *Player) safeDisconnect(vc *discordgo.VoiceConnection) error {
 	// Ensure channels exist before disconnecting
 	// This prevents panic in Kill() when it tries to close nil channels
 	if vc.OpusSend == nil {
-		vc.OpusSend = make(chan []byte, 2)
+		vc.OpusSend = make(chan []byte, 64)
 	}
 	if vc.OpusRecv == nil {
 		vc.OpusRecv = make(chan *discordgo.Packet, 2)
@@ -239,6 +240,10 @@ func (p *Player) Disconnect() {
 
 	if vc != nil {
 		_ = p.safeDisconnect(vc)
+	}
+
+	if p.onRemove != nil {
+		p.onRemove()
 	}
 }
 
@@ -362,7 +367,7 @@ type framedPCM struct {
 	data      []byte // 960*2*2 bytes
 }
 
-func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
+func readPCMFrame(r *bufio.Reader, buf []byte) (framedPCM, error) {
 	var hdr [16]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return framedPCM{}, err
@@ -373,7 +378,10 @@ func readPCMFrame(r *bufio.Reader) (framedPCM, error) {
 	if nb != 960 || n != 960*2*2 {
 		return framedPCM{}, fmt.Errorf("bad frame sizes nb=%d n=%d", nb, n)
 	}
-	buf := make([]byte, n)
+	if cap(buf) < n {
+		buf = make([]byte, n)
+	}
+	buf = buf[:n]
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return framedPCM{}, err
 	}
@@ -988,6 +996,9 @@ func (p *Player) scheduleIdleDisconnect() {
 			p.Conn = nil
 			p.ConnChannelID = ""
 			_ = p.safeDisconnect(vc)
+			if p.onRemove != nil {
+				p.onRemove()
+			}
 		}
 	})
 }
@@ -1005,7 +1016,7 @@ func isVoiceReady(vc *discordgo.VoiceConnection) bool {
 	}
 	// Ensure channels are initialized
 	if vc.OpusSend == nil {
-		vc.OpusSend = make(chan []byte, 2)
+		vc.OpusSend = make(chan []byte, 64)
 	}
 	if vc.OpusRecv == nil {
 		vc.OpusRecv = make(chan *discordgo.Packet, 2)
@@ -1051,7 +1062,9 @@ func (p *Player) sendLoop(
 	sess.producerWg.Add(1)
 	go p.producePackets(sess, startPos)
 
+	sess.producerWg.Add(1)
 	go func() {
+		defer sess.producerWg.Done()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
@@ -1084,6 +1097,7 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 
 	r := bufio.NewReaderSize(sess.pcm.Stdout(), 128*1024)
 	framePCM := make([]byte, sess.enc.FrameBytes())
+	readBuf := make([]byte, 0, sess.enc.FrameBytes())
 
 	var wall0 time.Time
 	var media0 int64
@@ -1103,10 +1117,11 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		default:
 		}
 
-		f, err := readPCMFrame(r)
+		f, err := readPCMFrame(r, readBuf)
 		if err != nil {
 			return
 		}
+		readBuf = f.data[:0]
 
 		if !started {
 			started = true

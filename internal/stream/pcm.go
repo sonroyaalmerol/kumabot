@@ -48,7 +48,8 @@ type PCMStreamer struct {
 	firstPTS48   int64
 	inFmt        astiav.SampleFormat
 
-	fifo []byte
+	fifo        []byte
+	interleaveBuf []byte // reused for planar→interleaved conversion
 
 	inputURL string
 	isHLS    bool
@@ -647,7 +648,10 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	ch := s.dstFrame.ChannelLayout().Channels()
 	isPlanar := s.dstFrame.SampleFormat().IsPlanar()
 	total := nb * ch * bytesPerSample
-	interleaved := make([]byte, total)
+	if cap(s.interleaveBuf) < total {
+		s.interleaveBuf = make([]byte, total)
+	}
+	interleaved := s.interleaveBuf[:total]
 
 	if !isPlanar {
 		// Packed: copy with SamplesCopyToBuffer to respect linesize
@@ -757,18 +761,15 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 			s.resumeAt48 = -1
 		}
 
-		// Normal emission
-		chunk := make([]byte, frameBytes)
-		copy(chunk, s.fifo[:frameBytes])
-		s.fifo = s.fifo[frameBytes:]
-
+		// Normal emission — fifo data is stable since we are single-threaded
 		if err := s.writePCMFrameTracked(PCMFrame{
-			Data:      chunk,
+			Data:      s.fifo[:frameBytes],
 			PTS48:     pts,
 			NbSamples: 960,
 		}); err != nil {
 			return err
 		}
+		s.fifo = s.fifo[frameBytes:]
 
 		s.totalSamplesProduced += 960
 	}
@@ -808,7 +809,10 @@ func (s *PCMStreamer) flushSWR() error {
 		const bytesPerSample = 2
 		ch := s.targetLayout.Channels()
 		total := nb * ch * bytesPerSample
-		interleaved := make([]byte, total)
+		if cap(s.interleaveBuf) < total {
+			s.interleaveBuf = make([]byte, total)
+		}
+		interleaved := s.interleaveBuf[:total]
 
 		if !s.dstFrame.SampleFormat().IsPlanar() {
 			n, err := s.dstFrame.SamplesCopyToBuffer(interleaved, 1)
@@ -822,7 +826,7 @@ func (s *PCMStreamer) flushSWR() error {
 			if s.dstFrame.SampleFormat() != astiav.SampleFormatS16P {
 				return fmt.Errorf("flush unexpected planar format: %s", s.dstFrame.SampleFormat().String())
 			}
-			planes := make([][]byte, ch)
+			var planes [2][]byte
 			for c := range ch {
 				pb, err := s.dstFrame.Data().Bytes(c)
 				if err != nil {
@@ -893,17 +897,14 @@ func (s *PCMStreamer) flushSWR() error {
 			}
 
 			// Normal emission
-			chunk := make([]byte, frameBytes)
-			copy(chunk, s.fifo[:frameBytes])
-			s.fifo = s.fifo[frameBytes:]
-
 			if err := s.writePCMFrameTracked(PCMFrame{
-				Data:      chunk,
+				Data:      s.fifo[:frameBytes],
 				PTS48:     pts,
 				NbSamples: 960,
 			}); err != nil {
 				return err
 			}
+			s.fifo = s.fifo[frameBytes:]
 
 			s.totalSamplesProduced += 960
 		}

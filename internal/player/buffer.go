@@ -15,6 +15,7 @@ type opusBuffer struct {
 	closed   bool
 	eos      bool
 	notEmpty *sync.Cond
+	pool     sync.Pool
 }
 
 type bufferedPacket struct {
@@ -27,6 +28,9 @@ func newOpusBuffer(maxPackets int) *opusBuffer {
 	ob := &opusBuffer{
 		packets: make([]bufferedPacket, maxPackets),
 		maxSize: maxPackets,
+		pool: sync.Pool{
+			New: func() any { return make([]byte, 0, 128) },
+		},
 	}
 	ob.notEmpty = sync.NewCond(&ob.mu)
 	return ob
@@ -40,14 +44,23 @@ func (ob *opusBuffer) Push(data []byte, pts48 int64, targetTS time.Time) bool {
 		return false
 	}
 
-	// Calculate buffer usage
 	used := (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
 	if used >= ob.maxSize-1 {
 		return false
 	}
 
+	// Recycle the old slot's buffer back to pool
+	old := ob.packets[ob.writePos]
+	if old.data != nil {
+		ob.pool.Put(old.data[:0])
+	}
+
+	// Get a buffer from pool and copy data into it
+	buf := ob.pool.Get().([]byte)
+	buf = append(buf[:0], data...)
+
 	ob.packets[ob.writePos] = bufferedPacket{
-		data:     append([]byte(nil), data...),
+		data:     buf,
 		pts48:    pts48,
 		targetTS: targetTS,
 	}
@@ -68,17 +81,15 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 		used := (ob.writePos - ob.readPos + ob.maxSize) % ob.maxSize
 		if used > 0 {
 			pkt := ob.packets[ob.readPos]
+			ob.packets[ob.readPos] = bufferedPacket{} // clear slot, keep data alive for caller
 			ob.readPos = (ob.readPos + 1) % ob.maxSize
 			return pkt, true
 		}
 
-		// No packets available
 		if ob.eos {
-			// End of stream reached and buffer is empty
 			return bufferedPacket{}, false
 		}
 
-		// Wait for data
 		ob.notEmpty.Wait()
 	}
 }
@@ -100,5 +111,12 @@ func (ob *opusBuffer) Close() {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	ob.closed = true
+	// Return all buffered data to pool
+	for i := 0; i < ob.maxSize; i++ {
+		if ob.packets[i].data != nil {
+			ob.pool.Put(ob.packets[i].data[:0])
+			ob.packets[i] = bufferedPacket{}
+		}
+	}
 	ob.notEmpty.Broadcast()
 }

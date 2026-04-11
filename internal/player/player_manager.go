@@ -24,6 +24,7 @@ func (pm *PlayerManager) Get(cfg *config.Config, repo *repository.Repo, cache *c
 		return p
 	}
 	p := NewPlayer(cfg, repo, cache, guildID)
+	p.onRemove = func() { pm.Remove(guildID) }
 	pm.Players[guildID] = p
 	return p
 }
@@ -32,4 +33,10 @@ func (pm *PlayerManager) Peek(guildID string) *Player {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	return pm.Players[guildID]
+}
+
+func (pm *PlayerManager) Remove(guildID string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	delete(pm.Players, guildID)
 }
