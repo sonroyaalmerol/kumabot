@@ -19,6 +19,7 @@ import (
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
 	"github.com/sonroyaalmerol/kumabot/internal/stream"
+	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
 
 const DefaultVolume = 100
@@ -132,6 +133,8 @@ func (p *Player) setIdleState() {
 	p.PositionSec = 0
 	queueEmpty := len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
 	p.mu.Unlock()
+
+	p.clearVoiceChannelStatus()
 
 	if queueEmpty {
 		slog.Info("player idle with empty queue - scheduling disconnect",
@@ -260,10 +263,12 @@ func (p *Player) Disconnect() {
 
 	vc := p.Conn
 	p.Conn = nil
+	connChannelID := p.ConnChannelID
 	p.ConnChannelID = ""
 	p.mu.Unlock()
 
 	if vc != nil {
+		p.clearVoiceChannelStatusWithChannel(connChannelID)
 		_ = p.safeDisconnect(vc)
 	}
 
@@ -622,22 +627,90 @@ func (p *Player) cleanOldEmbeds(s *discordgo.Session, channelID, botID string) {
 }
 
 func (p *Player) startEmbedUpdater(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	// Update embed every 5s and voice channel status every 3s for responsive progress.
+	// Embed edits are rate-limited to ~5/5s by Discord; 5s is safe.
+	// Voice channel status updates are separate from message edits.
+	embedTicker := time.NewTicker(5 * time.Second)
+	defer embedTicker.Stop()
+	statusTicker := time.NewTicker(3 * time.Second)
+	defer statusTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-embedTicker.C:
 			p.mu.Lock()
-			if p.Status != StatusPlaying {
-				p.mu.Unlock()
+			playing := p.Status == StatusPlaying || p.Status == StatusPaused
+			p.mu.Unlock()
+			if !playing {
 				return
 			}
-			p.mu.Unlock()
 			p.sendNowPlayingEmbed()
+		case <-statusTicker.C:
+			p.mu.Lock()
+			playing := p.Status == StatusPlaying
+			p.mu.Unlock()
+			if !playing {
+				return
+			}
+			p.updateVoiceChannelStatus()
 		}
+	}
+}
+
+// updateVoiceChannelStatus sets the voice channel status text showing current song + progress.
+// This is always visible at the top of the voice channel without scrolling through chat.
+func (p *Player) updateVoiceChannelStatus() {
+	p.mu.Lock()
+	s := p.Session
+	channelID := p.ConnChannelID
+	cur := p.NowPlaying
+	pos := p.PositionSec
+	status := p.Status
+	p.mu.Unlock()
+
+	if s == nil || channelID == "" || cur == nil || status != StatusPlaying {
+		return
+	}
+
+	elapsed := utils.PrettyTime(pos)
+	text := elapsed
+	if cur.Length > 0 && !cur.IsLive {
+		text = elapsed + " / " + utils.PrettyTime(cur.Length)
+	}
+	text += "  ▶  " + cur.Title
+	if len(text) > 500 {
+		text = text[:497] + "..."
+	}
+
+	body := struct{ Status string }{Status: text}
+	url := "https://discord.com/api/v10/channels/" + channelID + "/voice-status"
+	if _, err := s.Request("PUT", url, body); err != nil {
+		slog.Debug("failed to set voice channel status", "guildID", p.guildID, "err", err)
+	}
+}
+
+// clearVoiceChannelStatus removes the voice channel status text.
+func (p *Player) clearVoiceChannelStatus() {
+	p.mu.Lock()
+	channelID := p.ConnChannelID
+	p.mu.Unlock()
+	p.clearVoiceChannelStatusWithChannel(channelID)
+}
+
+func (p *Player) clearVoiceChannelStatusWithChannel(channelID string) {
+	p.mu.Lock()
+	s := p.Session
+	p.mu.Unlock()
+
+	if s == nil || channelID == "" {
+		return
+	}
+
+	url := "https://discord.com/api/v10/channels/" + channelID + "/voice-status"
+	if _, err := s.Request("DELETE", url, nil); err != nil {
+		slog.Debug("failed to clear voice channel status", "guildID", p.guildID, "err", err)
 	}
 }
 
@@ -680,6 +753,8 @@ func (p *Player) Stop() {
 		_ = p.Conn.Speaking(false)
 	}
 	p.mu.Unlock()
+
+	p.clearVoiceChannelStatus()
 
 	slog.Info("player stopped - scheduling disconnect", "guildID", p.guildID)
 	p.scheduleIdleDisconnect()
