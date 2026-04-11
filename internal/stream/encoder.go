@@ -3,11 +3,45 @@ package stream
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/asticode/go-astiav"
 )
 
 type OpusPacketHandler func(pkt []byte) error
+
+// encoderPool reuses Opus encoders across play sessions to avoid ~50-100ms
+// startup cost per song (codec open, frame/packet alloc, buffer alloc).
+var encoderPool typedEncoderPool
+
+type typedEncoderPool struct {
+	mu    sync.Mutex
+	items []*Encoder
+}
+
+func (p *typedEncoderPool) Get() (*Encoder, error) {
+	p.mu.Lock()
+	if len(p.items) > 0 {
+		e := p.items[len(p.items)-1]
+		p.items = p.items[:len(p.items)-1]
+		p.mu.Unlock()
+		return e, nil
+	}
+	p.mu.Unlock()
+	return NewEncoder()
+}
+
+func (p *typedEncoderPool) Put(e *Encoder) {
+	p.mu.Lock()
+	p.items = append(p.items, e)
+	p.mu.Unlock()
+}
+
+// GetPooledEncoder returns an Opus encoder from the pool (or creates a new one).
+func GetPooledEncoder() (*Encoder, error) { return encoderPool.Get() }
+
+// PutPooledEncoder returns an encoder to the pool for reuse.
+func PutPooledEncoder(e *Encoder) { encoderPool.Put(e) }
 
 type Encoder struct {
 	cc         *astiav.CodecContext

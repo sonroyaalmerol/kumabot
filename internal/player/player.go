@@ -503,7 +503,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 		playCancel()
 		return err
 	}
-	enc, err := stream.NewEncoder()
+	enc, err := stream.GetPooledEncoder()
 	if err != nil {
 		pcm.Close()
 		playCancel()
@@ -527,7 +527,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 		// state changed while preparing; abort
 		p.mu.Unlock()
 		sess.cancel()
-		enc.Close()
+		stream.PutPooledEncoder(enc)
 		pcm.Close()
 		return errors.New("play aborted due to state change")
 	}
@@ -1064,7 +1064,7 @@ func (p *Player) sendLoop(
 		sess.producerWg.Wait()
 
 		sess.buf.Close()
-		sess.enc.Close()
+		stream.PutPooledEncoder(sess.enc)
 		sess.pcm.Close()
 		sess.cancel()
 		close(sess.doneCh)
@@ -1187,6 +1187,19 @@ func (p *Player) consumePackets(
 
 	const minBufferPackets = 20
 
+	// Reusable timers to avoid per-frame heap allocations (hot path: 50/sec)
+	waitTimer := time.NewTimer(0)
+	if !waitTimer.Stop() {
+		<-waitTimer.C
+	}
+	defer waitTimer.Stop()
+
+	dropTimer := time.NewTimer(0)
+	if !dropTimer.Stop() {
+		<-dropTimer.C
+	}
+	defer dropTimer.Stop()
+
 	// Initial buffer wait
 	for sess.buf.BufferedCount() < minBufferPackets {
 		select {
@@ -1221,21 +1234,26 @@ func (p *Player) consumePackets(
 		}
 
 		if d := time.Until(pkt.targetTS); d > 0 {
+			waitTimer.Reset(d)
 			select {
 			case <-sess.ctx.Done():
+				waitTimer.Stop()
 				return
-			case <-time.After(d):
+			case <-waitTimer.C:
 			}
 		}
 
+		dropTimer.Reset(200 * time.Millisecond)
 		select {
 		case <-sess.ctx.Done():
 			sess.buf.Release(pkt.data)
+			dropTimer.Stop()
 			return
 		case vc.OpusSend <- pkt.data:
+			dropTimer.Stop()
 			updatePosition(pkt.pts48)
 			droppedCount = 0
-		case <-time.After(200 * time.Millisecond):
+		case <-dropTimer.C:
 			sess.buf.Release(pkt.data)
 			droppedCount++
 			slog.Debug("dropped packet",
