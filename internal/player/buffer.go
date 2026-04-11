@@ -6,6 +6,31 @@ import (
 	"time"
 )
 
+// typedPool is a generic, type-safe pool that avoids sync.Pool's interface boxing.
+type typedPool[T any] struct {
+	mu    sync.Mutex
+	items []T
+	newFn func() T
+}
+
+func (p *typedPool[T]) Get() T {
+	p.mu.Lock()
+	if len(p.items) == 0 {
+		p.mu.Unlock()
+		return p.newFn()
+	}
+	v := p.items[len(p.items)-1]
+	p.items = p.items[:len(p.items)-1]
+	p.mu.Unlock()
+	return v
+}
+
+func (p *typedPool[T]) Put(v T) {
+	p.mu.Lock()
+	p.items = append(p.items, v)
+	p.mu.Unlock()
+}
+
 type opusBuffer struct {
 	mu       sync.Mutex
 	packets  []bufferedPacket
@@ -15,7 +40,7 @@ type opusBuffer struct {
 	closed   bool
 	eos      bool
 	notEmpty *sync.Cond
-	pool     sync.Pool
+	pool     typedPool[[]byte]
 }
 
 type bufferedPacket struct {
@@ -28,8 +53,8 @@ func newOpusBuffer(maxPackets int) *opusBuffer {
 	ob := &opusBuffer{
 		packets: make([]bufferedPacket, maxPackets),
 		maxSize: maxPackets,
-		pool: sync.Pool{
-			New: func() any { return make([]byte, 0, 200) },
+		pool: typedPool[[]byte]{
+			newFn: func() []byte { return make([]byte, 0, 200) },
 		},
 	}
 	ob.notEmpty = sync.NewCond(&ob.mu)
@@ -56,7 +81,7 @@ func (ob *opusBuffer) Push(data []byte, pts48 int64, targetTS time.Time) bool {
 	}
 
 	// Get a buffer from pool and copy data into it
-	buf := ob.pool.Get().([]byte)
+	buf := ob.pool.Get()
 	buf = append(buf[:0], data...)
 
 	ob.packets[ob.writePos] = bufferedPacket{
