@@ -25,6 +25,8 @@ func songLink(s SongMetadata) string {
 }
 
 func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
+	const maxDesc = 4096
+
 	cur := p.GetCurrent()
 	if cur == nil {
 		return &discordgo.MessageEmbed{
@@ -33,38 +35,98 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 			Color:       0x992222,
 		}
 	}
-	pos := p.GetPosition()
-	button := "▶️"
-	if p.Status == StatusPlaying {
-		button = "⏹️"
-	}
+
+	p.mu.Lock()
+	pos := p.PositionSec
+	status := p.Status
+	loopSong := p.LoopSong
+	loopQueue := p.LoopQueue
+	shuffle := p.ShuffleMode
+	radio := p.RadioMode
+	searching := p.IsSearching()
+	queue := p.SongQueue
+	qpos := p.Qpos
+	p.mu.Unlock()
+
+	// --- Now playing section ---
 	progress := 0.0
 	if cur.Length > 0 {
 		progress = float64(pos) / float64(cur.Length)
 	}
-	bar := ProgressBar(10, progress)
-	elapsed := "live"
+	bar := ProgressBar(12, progress)
+	elapsed := "LIVE"
 	if !cur.IsLive {
-		elapsed = fmt.Sprintf("%s/%s", utils.PrettyTime(pos), utils.PrettyTime(cur.Length))
-	}
-	loop := ""
-	if p.LoopSong {
-		loop = "🔂"
-	} else if p.LoopQueue {
-		loop = "🔁"
+		elapsed = fmt.Sprintf("%s / %s", utils.PrettyTime(pos), utils.PrettyTime(cur.Length))
 	}
 
-	desc := fmt.Sprintf("**%s**\nRequested by: <@%s>\n\n%s %s `[ %s ]` %s",
+	var tags []string
+	if loopSong {
+		tags = append(tags, "🔂 Song")
+	} else if loopQueue {
+		tags = append(tags, "🔁 Queue")
+	}
+	if shuffle {
+		tags = append(tags, "🔀 Shuffle")
+	}
+	if radio {
+		tags = append(tags, "📻 Radio")
+	}
+
+	desc := fmt.Sprintf("**%s**\n<@%s>\n%s `[ %s ]`",
 		songLink(*cur),
 		cur.RequestedBy,
-		button, bar, elapsed, loop,
+		bar, elapsed,
 	)
+	if len(tags) > 0 {
+		desc += "  " + strings.Join(tags, " ")
+	}
+
+	// --- Queue section ---
+	upcoming := queue[qpos+1:]
+	if len(upcoming) > 0 || searching {
+		desc += "\n\n**Up Next:**\n"
+
+		// Budget remaining chars for queue lines
+		remaining := maxDesc - len(desc) - 30 // reserve 30 for "…and N more"
+
+		for i, s := range upcoming {
+			dur := "LIVE"
+			if !s.IsLive {
+				dur = utils.PrettyTime(s.Length)
+			}
+			prefix := ""
+			if s.IsRadioSuggestion {
+				prefix = "📻 "
+			}
+			line := fmt.Sprintf("`%d.` %s%s `[ %s ]`\n", i+1, prefix, songLink(s), dur)
+			if len(line) > remaining {
+				// Can't fit this line — show count of remaining
+				extra := len(upcoming) - i
+				more := fmt.Sprintf("…and **%d** more", extra)
+				if len(desc)+len(more)+1 <= maxDesc {
+					desc += more
+				}
+				break
+			}
+			desc += line
+			remaining -= len(line)
+		}
+
+		if searching && len(desc)+50 <= maxDesc {
+			desc += "\n*Still resolving…*"
+		}
+	}
 
 	color := 0x006400
 	title := "Now Playing"
-	if p.Status != StatusPlaying {
+	if status != StatusPlaying {
 		color = 0x8B0000
 		title = "Paused"
+	}
+
+	footer := fmt.Sprintf("Source: %s", cur.Artist)
+	if cur.Playlist != nil {
+		footer += " (" + cur.Playlist.Title + ")"
 	}
 
 	embed := &discordgo.MessageEmbed{
@@ -72,7 +134,7 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 		Description: desc,
 		Color:       color,
 		Footer: &discordgo.MessageEmbedFooter{
-			Text: fmt.Sprintf("Source: %s", cur.Artist),
+			Text: footer,
 		},
 	}
 	if cur.Thumbnail != "" {
