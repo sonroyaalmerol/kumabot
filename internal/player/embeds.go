@@ -128,6 +128,7 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 	if cur.Playlist != nil {
 		footer += " (" + cur.Playlist.Title + ")"
 	}
+	footer += " • kumabot"
 
 	embed := &discordgo.MessageEmbed{
 		Title:       title,

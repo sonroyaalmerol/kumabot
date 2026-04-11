@@ -564,6 +564,10 @@ func (p *Player) sendNowPlayingEmbed() {
 	textChanID := p.TextChannelID
 	guildID := p.guildID
 	existingMsg := p.lastEmbedMessage
+	botID := ""
+	if s != nil && s.State != nil && s.State.User != nil {
+		botID = s.State.User.ID
+	}
 	p.mu.Unlock()
 
 	if s == nil || textChanID == "" {
@@ -581,14 +585,10 @@ func (p *Player) sendNowPlayingEmbed() {
 		// Edit failed (message deleted, etc.) — fall through to send new
 	}
 
-	// Check if the existing embed is still the latest message in the channel.
-	// If other messages were sent after it, delete the old embed to avoid clutter.
-	if existingMsg != nil {
-		msgs, err := s.ChannelMessages(textChanID, 1, "", "", "")
-		if err == nil && len(msgs) > 0 && msgs[0].ID != existingMsg.ID {
-			_ = s.ChannelMessageDelete(textChanID, existingMsg.ID)
-		}
-	}
+	// Scan recent messages for old now-playing embeds to clean up.
+	// This handles both: old embed not being latest, and bot restarts where
+	// lastEmbedMessage is nil but stale embeds exist in channel history.
+	p.cleanOldEmbeds(s, textChanID, botID)
 
 	newMsg, err := s.ChannelMessageSendEmbed(textChanID, embed)
 	if err != nil {
@@ -599,6 +599,26 @@ func (p *Player) sendNowPlayingEmbed() {
 	p.mu.Lock()
 	p.lastEmbedMessage = newMsg
 	p.mu.Unlock()
+}
+
+// cleanOldEmbeds scans recent channel messages and deletes any now-playing embeds
+// previously sent by this bot (identified by the "kumabot" footer marker).
+func (p *Player) cleanOldEmbeds(s *discordgo.Session, channelID, botID string) {
+	msgs, err := s.ChannelMessages(channelID, 20, "", "", "")
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		if m.Author.ID != botID || len(m.Embeds) == 0 {
+			continue
+		}
+		for _, e := range m.Embeds {
+			if e.Footer != nil && strings.HasSuffix(e.Footer.Text, "kumabot") {
+				_ = s.ChannelMessageDelete(channelID, m.ID)
+				break
+			}
+		}
+	}
 }
 
 func (p *Player) startEmbedUpdater(ctx context.Context) {
