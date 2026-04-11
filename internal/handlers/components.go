@@ -14,11 +14,12 @@ import (
 
 // Component custom IDs
 const (
-	btnPrev    = "kuma:prev"
-	btnPause   = "kuma:pause"
-	btnNext    = "kuma:next"
-	btnLoop    = "kuma:loop"
-	btnStop    = "kuma:stop"
+	btnPrev      = "kuma:prev"
+	btnPause     = "kuma:pause"
+	btnNext      = "kuma:next"
+	btnLoop      = "kuma:loop"
+	btnStop      = "kuma:stop"
+	btnRadio     = "kuma:radio"
 	btnQueuePrev = "kuma:qprev"
 	btnQueueNext = "kuma:qnext"
 )
@@ -52,6 +53,8 @@ func (c *ComponentHandler) Handle(s *discordgo.Session, i *discordgo.Interaction
 		c.handleLoop(s, i, guildID)
 	case btnStop:
 		c.handleStop(s, i, guildID)
+	case btnRadio:
+		c.handleRadio(s, i, guildID)
 	case btnQueuePrev:
 		c.handleQueuePage(s, i, guildID, -1)
 	case btnQueueNext:
@@ -87,8 +90,8 @@ func (c *ComponentHandler) handlePrev(s *discordgo.Session, i *discordgo.Interac
 		respondEmpty(s, i)
 		return
 	}
-	_ = p.Back(context.Background(), s, i)
 	respondEmpty(s, i)
+	_ = p.Back(context.Background(), s, i)
 	p.SendNowPlayingEmbed()
 }
 
@@ -99,9 +102,7 @@ func (c *ComponentHandler) handlePause(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	p.MuLock()
 	status := p.StatusPub()
-	p.MuUnlock()
 
 	if status == plib.StatusPlaying {
 		_ = p.Pause()
@@ -120,8 +121,8 @@ func (c *ComponentHandler) handleNext(s *discordgo.Session, i *discordgo.Interac
 		respondEmpty(s, i)
 		return
 	}
-	_ = p.Next(context.Background(), s, i)
 	respondEmpty(s, i)
+	_ = p.Next(context.Background(), s, i)
 	p.SendNowPlayingEmbed()
 }
 
@@ -146,6 +147,22 @@ func (c *ComponentHandler) handleStop(s *discordgo.Session, i *discordgo.Interac
 	respondEmpty(s, i)
 }
 
+func (c *ComponentHandler) handleRadio(s *discordgo.Session, i *discordgo.InteractionCreate, guildID string) {
+	p := c.player(guildID)
+	if p == nil {
+		respondEmpty(s, i)
+		return
+	}
+
+	on := p.ToggleRadioMode()
+	if on {
+		go p.TryStartRadio()
+	}
+
+	embed := plib.BuildPlayingEmbed(p)
+	respondUpdateEmbed(s, i, embed, plib.PlayingComponents(p))
+}
+
 func (c *ComponentHandler) handleQueuePage(s *discordgo.Session, i *discordgo.InteractionCreate, guildID string, delta int) {
 	// Extract current page from embed footer
 	currentPage := 1
@@ -160,7 +177,7 @@ func (c *ComponentHandler) handleQueuePage(s *discordgo.Session, i *discordgo.In
 	}
 
 	ctx := context.Background()
-		_, _ = c.repo.UpsertSettings(ctx, guildID)
+	_, _ = c.repo.UpsertSettings(ctx, guildID)
 	set, err := c.repo.GetSettings(ctx, guildID)
 	if err != nil {
 		respondEmpty(s, i)

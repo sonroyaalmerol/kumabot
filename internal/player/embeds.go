@@ -144,15 +144,19 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 	return embed
 }
 
-// PlayingComponents returns the playback control button row for the now-playing embed.
+// PlayingComponents returns the playback control button rows for the now-playing embed.
 func PlayingComponents(p *Player) []discordgo.MessageComponent {
-	pauseLabel := "Pause"
+	pauseLabel := "⏸"
 	if p.StatusPub() != StatusPlaying {
-		pauseLabel = "Resume"
+		pauseLabel = "▶"
 	}
 	loopStyle := discordgo.SecondaryButton
 	if p.LoopSongPub() {
 		loopStyle = discordgo.PrimaryButton
+	}
+	radioStyle := discordgo.SecondaryButton
+	if p.IsRadioMode() {
+		radioStyle = discordgo.PrimaryButton
 	}
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{
@@ -161,6 +165,7 @@ func PlayingComponents(p *Player) []discordgo.MessageComponent {
 				discordgo.Button{Label: pauseLabel, Style: discordgo.PrimaryButton, CustomID: "kuma:pause"},
 				discordgo.Button{Label: "⏭", Style: discordgo.SecondaryButton, CustomID: "kuma:next"},
 				discordgo.Button{Label: "🔁", Style: loopStyle, CustomID: "kuma:loop"},
+				discordgo.Button{Label: "📻", Style: radioStyle, CustomID: "kuma:radio"},
 				discordgo.Button{Label: "⏹", Style: discordgo.DangerButton, CustomID: "kuma:stop"},
 			},
 		},
