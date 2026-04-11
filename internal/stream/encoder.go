@@ -40,11 +40,12 @@ func (p *typedEncoderPool) Put(e *Encoder) {
 // GetPooledEncoder returns an Opus encoder from the pool (or creates a new one).
 func GetPooledEncoder() (*Encoder, error) { return encoderPool.Get() }
 
-// PutPooledEncoder flushes any remaining codec state and returns the encoder to the pool.
+// PutPooledEncoder returns the encoder to the pool for reuse.
+// Note: EncodeFrame already drains all packets per call (receive loop exits on
+// EAGAIN), so no flush is needed. Sending a nil frame via Flush would put the
+// codec into drain mode and make it unreusable ("Once draining is started, it
+// is impossible to resume encoding" — FFmpeg docs).
 func PutPooledEncoder(e *Encoder) {
-	// Drain any buffered frames in the codec context to prevent stale audio
-	// bleeding into the next song that reuses this encoder.
-	_ = e.Flush(func(pkt []byte) error { return nil })
 	encoderPool.Put(e)
 }
 
