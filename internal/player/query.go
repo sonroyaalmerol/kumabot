@@ -266,50 +266,6 @@ func applySponsorBlockToSong(ctx context.Context, cfg *config.Config, m *SongMet
 	}
 }
 
-func spotifyTracksToYouTube(
-	ctx context.Context,
-	cfg *config.Config,
-	tracks []spotify.Track,
-	qp *QueuedPlaylist,
-	playlistLimit int,
-	split bool,
-) ([]SongMetadata, string, error) {
-	if len(tracks) == 0 {
-		return nil, "", nil
-	}
-	if playlistLimit > 0 && len(tracks) > playlistLimit {
-		utils.ShuffleSlice(tracks)
-		tracks = tracks[:playlistLimit]
-	}
-
-	out := make([]SongMetadata, 0, len(tracks))
-	notFound := 0
-
-	for _, t := range tracks {
-		q := fmt.Sprintf(`ytsearch1:"%s" "%s"`, t.Name, t.Artist)
-		info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, q, stream.DefaultInfoTimeout)
-		if err != nil || info == nil {
-			notFound++
-			continue
-		}
-		tracks := ytInfoToMetadata(info, qp, split)
-		for _, t := range tracks {
-			applySponsorBlockToSong(ctx, cfg, &t)
-			out = append(out, t)
-		}
-	}
-
-	extra := ""
-	if notFound > 0 {
-		if notFound == 1 {
-			extra = "1 song was not found"
-		} else {
-			extra = fmt.Sprintf("%d songs were not found", notFound)
-		}
-	}
-	return out, extra, nil
-}
-
 func ytInfoToMetadata(info *stream.YTDLPInfo, qp *QueuedPlaylist, split bool) []SongMetadata {
 	thumb := ""
 	if len(info.Thumbnails) > 0 {

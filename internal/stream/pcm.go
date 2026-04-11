@@ -589,6 +589,111 @@ func (s *PCMStreamer) onDecodedFrame(src *astiav.Frame) error {
 	return s.convertAndWritePCM(src)
 }
 
+// interleaveFrame copies the dst frame's audio data into an interleaved S16LE buffer.
+func (s *PCMStreamer) interleaveFrame() ([]byte, error) {
+	nb := s.dstFrame.NbSamples()
+	if nb <= 0 {
+		return nil, nil
+	}
+	const bytesPerSample = 2
+	ch := s.dstFrame.ChannelLayout().Channels()
+	total := nb * ch * bytesPerSample
+	if cap(s.interleaveBuf) < total {
+		s.interleaveBuf = make([]byte, total)
+	}
+	interleaved := s.interleaveBuf[:total]
+
+	if !s.dstFrame.SampleFormat().IsPlanar() {
+		n, err := s.dstFrame.SamplesCopyToBuffer(interleaved, 1)
+		if err != nil {
+			return nil, fmt.Errorf("packed copy to buffer: %w", err)
+		}
+		if n != total {
+			return nil, fmt.Errorf("packed copy size mismatch: got %d want %d", n, total)
+		}
+	} else {
+		if s.dstFrame.SampleFormat() != astiav.SampleFormatS16P {
+			return nil, fmt.Errorf("unexpected planar format: %s", s.dstFrame.SampleFormat().String())
+		}
+		var planes [2][]byte
+		for c := range ch {
+			pb, err := s.dstFrame.Data().Bytes(c)
+			if err != nil {
+				return nil, fmt.Errorf("dst plane%d bytes: %w", c, err)
+			}
+			if len(pb) < nb*bytesPerSample {
+				return nil, fmt.Errorf("planar dst too small: ch%d=%d need=%d", c, len(pb), nb*bytesPerSample)
+			}
+			planes[c] = pb
+		}
+		outOff := 0
+		for i := range nb {
+			for c := range ch {
+				copy(interleaved[outOff:outOff+bytesPerSample], planes[c][i*bytesPerSample:i*bytesPerSample+bytesPerSample])
+				outOff += bytesPerSample
+			}
+		}
+	}
+	return interleaved, nil
+}
+
+const frameBytes = 960 * 2 * 2
+
+// emitFifoFrames drains the FIFO into 960-sample PCM frames with sample-accurate trim.
+func (s *PCMStreamer) emitFifoFrames(tag string) error {
+	for len(s.fifo) >= frameBytes {
+		pts := s.streamStartPTS48 + s.totalSamplesProduced
+
+		if s.resumeAt48 >= 0 {
+			frameStart := pts
+			frameEnd := pts + 960
+
+			pcmDebugf("%s trim check: frame=[%d..%d) resume=%d", tag, frameStart, frameEnd, s.resumeAt48)
+
+			if frameEnd <= s.resumeAt48 {
+				pcmDebugf("  -> %s: skipping frame (before resume point)", tag)
+				s.totalSamplesProduced += 960
+				s.fifo = s.fifo[frameBytes:]
+				continue
+			}
+
+			if frameStart < s.resumeAt48 && s.resumeAt48 < frameEnd {
+				offsetSamples := int(s.resumeAt48 - frameStart)
+				offsetBytes := offsetSamples * 4
+
+				pcmDebugf("  -> %s: trimming %d samples (%d bytes) from frame start", tag, offsetSamples, offsetBytes)
+
+				partialLen := frameBytes - offsetBytes
+				partial := make([]byte, partialLen)
+				copy(partial, s.fifo[offsetBytes:frameBytes])
+
+				s.fifo = s.fifo[frameBytes:]
+				s.fifo = append(partial, s.fifo...)
+
+				s.totalSamplesProduced = s.resumeAt48 - s.streamStartPTS48
+				s.resumeAt48 = -1
+
+				pcmDebugf("  -> %s: resume aligned at PTS48=%d", tag, s.streamStartPTS48+s.totalSamplesProduced)
+				continue
+			}
+
+			pcmDebugf("  -> %s: frame aligned, resuming normal playback", tag)
+			s.resumeAt48 = -1
+		}
+
+		if err := s.writePCMFrameTracked(PCMFrame{
+			Data:      s.fifo[:frameBytes],
+			PTS48:     pts,
+			NbSamples: 960,
+		}); err != nil {
+			return err
+		}
+		s.fifo = s.fifo[frameBytes:]
+		s.totalSamplesProduced += 960
+	}
+	return nil
+}
+
 func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	// Ensure src fields are sane
 	if src.SampleRate() == 0 {
@@ -630,10 +735,6 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 	}
 
 	// Validate dst params
-	nb := s.dstFrame.NbSamples()
-	if nb <= 0 {
-		return nil
-	}
 	if s.dstFrame.SampleRate() != 48000 ||
 		s.dstFrame.ChannelLayout().Channels() != 2 ||
 		s.dstFrame.SampleFormat() != astiav.SampleFormatS16 {
@@ -643,57 +744,13 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 			s.dstFrame.ChannelLayout().Channels())
 	}
 
-	// Build interleaved S16LE buffer based on declared sample format
-	const bytesPerSample = 2
-	ch := s.dstFrame.ChannelLayout().Channels()
-	isPlanar := s.dstFrame.SampleFormat().IsPlanar()
-	total := nb * ch * bytesPerSample
-	if cap(s.interleaveBuf) < total {
-		s.interleaveBuf = make([]byte, total)
+	interleaved, err := s.interleaveFrame()
+	if err != nil {
+		return err
 	}
-	interleaved := s.interleaveBuf[:total]
-
-	if !isPlanar {
-		// Packed: copy with SamplesCopyToBuffer to respect linesize
-		n, err := s.dstFrame.SamplesCopyToBuffer(interleaved, 1)
-		if err != nil {
-			return fmt.Errorf("packed copy to buffer: %w", err)
-		}
-		if n != total {
-			return fmt.Errorf("packed copy size mismatch: got %d want %d", n, total)
-		}
-	} else {
-		// Planar: interleave using linesizes and bytes-per-sample
-		// We assume S16P as target; validate sample format
-		if s.dstFrame.SampleFormat() != astiav.SampleFormatS16P {
-			return fmt.Errorf("unexpected planar format: %s", s.dstFrame.SampleFormat().String())
-		}
-		// Gather plane byte slices
-		planes := make([][]byte, ch)
-		for c := range ch {
-			pb, err := s.dstFrame.Data().Bytes(c)
-			if err != nil {
-				return fmt.Errorf("dst plane%d bytes: %w", c, err)
-			}
-			if len(pb) < nb*bytesPerSample {
-				return fmt.Errorf("planar dst too small: ch%d=%d need=%d", c, len(pb), nb*bytesPerSample)
-			}
-			planes[c] = pb
-		}
-		// Interleave sample-by-sample, channel order as provided
-		// sample index i: for each channel c, append 2 bytes
-		outOff := 0
-		for i := range nb {
-			for c := range ch {
-				src := planes[c][i*bytesPerSample : i*bytesPerSample+bytesPerSample]
-				copy(interleaved[outOff:outOff+bytesPerSample], src)
-				outOff += bytesPerSample
-			}
-		}
+	if interleaved == nil {
+		return nil
 	}
-
-	// Append to FIFO and emit exact 960-sample frames
-	const frameBytes = 960 * 2 * 2
 	s.fifo = append(s.fifo, interleaved...)
 
 	// Resync after reconnection using actual decoded PTS
@@ -703,77 +760,14 @@ func (s *PCMStreamer) convertAndWritePCM(src *astiav.Frame) error {
 			srcPTS = 0
 		}
 		actualStartPTS48 := astiav.RescaleQ(srcPTS, s.timeBase, astiav.NewRational(1, 48000))
-
-		// Fifo might have multiple frames worth - account for that
-		fifoSamples := int64(len(s.fifo) / 4)                 // bytes to samples
-		firstFramePTS := actualStartPTS48 + fifoSamples - 960 // PTS of first pending frame
-
+		fifoSamples := int64(len(s.fifo) / 4)
+		firstFramePTS := actualStartPTS48 + fifoSamples - 960
 		s.totalSamplesProduced = firstFramePTS - s.streamStartPTS48
-
 		pcmDebugf("resynced after reconnection: firstDecodedPTS=%d fifoSamples=%d firstFramePTS=%d totalProduced=%d",
 			actualStartPTS48, fifoSamples, firstFramePTS, s.totalSamplesProduced)
 	}
 
-	for len(s.fifo) >= frameBytes {
-		// Calculate PTS from samples produced
-		pts := s.streamStartPTS48 + s.totalSamplesProduced
-
-		// Sample-accurate trim logic on resume
-		if s.resumeAt48 >= 0 {
-			frameStart := pts
-			frameEnd := pts + 960
-
-			pcmDebugf("trim check: frame=[%d..%d) resume=%d", frameStart, frameEnd, s.resumeAt48)
-
-			// Case 1: Frame before resume point - skip
-			if frameEnd <= s.resumeAt48 {
-				pcmDebugf("  -> skipping frame (before resume point)")
-				s.totalSamplesProduced += 960
-				s.fifo = s.fifo[frameBytes:]
-				continue
-			}
-
-			// Case 2: Resume point inside frame - trim
-			if frameStart < s.resumeAt48 && s.resumeAt48 < frameEnd {
-				offsetSamples := int(s.resumeAt48 - frameStart)
-				offsetBytes := offsetSamples * 4
-
-				pcmDebugf("  -> trimming %d samples (%d bytes) from frame start", offsetSamples, offsetBytes)
-
-				partialLen := frameBytes - offsetBytes
-				partial := make([]byte, partialLen)
-				copy(partial, s.fifo[offsetBytes:frameBytes])
-
-				s.fifo = s.fifo[frameBytes:]
-				s.fifo = append(partial, s.fifo...)
-
-				// Adjust sample counter to resume point
-				s.totalSamplesProduced = s.resumeAt48 - s.streamStartPTS48
-				s.resumeAt48 = -1
-
-				pcmDebugf("  -> resume aligned at PTS48=%d (produced=%d)",
-					s.streamStartPTS48+s.totalSamplesProduced, s.totalSamplesProduced)
-				continue
-			}
-
-			// Case 3: Frame aligned
-			pcmDebugf("  -> frame aligned, resuming normal playback")
-			s.resumeAt48 = -1
-		}
-
-		// Normal emission — fifo data is stable since we are single-threaded
-		if err := s.writePCMFrameTracked(PCMFrame{
-			Data:      s.fifo[:frameBytes],
-			PTS48:     pts,
-			NbSamples: 960,
-		}); err != nil {
-			return err
-		}
-		s.fifo = s.fifo[frameBytes:]
-
-		s.totalSamplesProduced += 960
-	}
-	return nil
+	return s.emitFifoFrames("pcm")
 }
 
 func (s *PCMStreamer) flushSWR() error {
@@ -802,111 +796,17 @@ func (s *PCMStreamer) flushSWR() error {
 			return err
 		}
 
-		nb := s.dstFrame.NbSamples()
-		if nb <= 0 {
+		interleaved, err := s.interleaveFrame()
+		if err != nil {
+			return err
+		}
+		if interleaved == nil {
 			continue
 		}
-		const bytesPerSample = 2
-		ch := s.targetLayout.Channels()
-		total := nb * ch * bytesPerSample
-		if cap(s.interleaveBuf) < total {
-			s.interleaveBuf = make([]byte, total)
-		}
-		interleaved := s.interleaveBuf[:total]
-
-		if !s.dstFrame.SampleFormat().IsPlanar() {
-			n, err := s.dstFrame.SamplesCopyToBuffer(interleaved, 1)
-			if err != nil {
-				return err
-			}
-			if n != total {
-				return fmt.Errorf("flush packed copy size mismatch: got %d want %d", n, total)
-			}
-		} else {
-			if s.dstFrame.SampleFormat() != astiav.SampleFormatS16P {
-				return fmt.Errorf("flush unexpected planar format: %s", s.dstFrame.SampleFormat().String())
-			}
-			var planes [2][]byte
-			for c := range ch {
-				pb, err := s.dstFrame.Data().Bytes(c)
-				if err != nil {
-					return err
-				}
-				if len(pb) < nb*bytesPerSample {
-					return fmt.Errorf("flush planar too small: ch%d=%d need=%d", c, len(pb), nb*bytesPerSample)
-				}
-				planes[c] = pb
-			}
-			outOff := 0
-			for i := range nb {
-				for c := range ch {
-					src := planes[c][i*bytesPerSample : i*bytesPerSample+bytesPerSample]
-					copy(interleaved[outOff:outOff+bytesPerSample], src)
-					outOff += bytesPerSample
-				}
-			}
-		}
-
-		const frameBytes = 960 * 2 * 2
 		s.fifo = append(s.fifo, interleaved...)
 
-		for len(s.fifo) >= frameBytes {
-			// Calculate PTS from samples produced (same as convertAndWritePCM)
-			pts := s.streamStartPTS48 + s.totalSamplesProduced
-
-			// Sample-accurate trim logic on resume
-			if s.resumeAt48 >= 0 {
-				frameStart := pts
-				frameEnd := pts + 960
-
-				pcmDebugf("flush trim check: frame=[%d..%d) resume=%d", frameStart, frameEnd, s.resumeAt48)
-
-				// Case 1: Frame before resume point - skip
-				if frameEnd <= s.resumeAt48 {
-					pcmDebugf("  -> flush: skipping frame (before resume point)")
-					s.totalSamplesProduced += 960
-					s.fifo = s.fifo[frameBytes:]
-					continue
-				}
-
-				// Case 2: Resume point inside frame - trim
-				if frameStart < s.resumeAt48 && s.resumeAt48 < frameEnd {
-					offsetSamples := int(s.resumeAt48 - frameStart)
-					offsetBytes := offsetSamples * 4
-
-					pcmDebugf("  -> flush: trimming %d samples (%d bytes) from frame start", offsetSamples, offsetBytes)
-
-					partialLen := frameBytes - offsetBytes
-					partial := make([]byte, partialLen)
-					copy(partial, s.fifo[offsetBytes:frameBytes])
-
-					s.fifo = s.fifo[frameBytes:]
-					s.fifo = append(partial, s.fifo...)
-
-					// Adjust sample counter to resume point
-					s.totalSamplesProduced = s.resumeAt48 - s.streamStartPTS48
-					s.resumeAt48 = -1
-
-					pcmDebugf("  -> flush: resume aligned at PTS48=%d", s.streamStartPTS48+s.totalSamplesProduced)
-					continue
-				}
-
-				// Case 3: Frame aligned
-				pcmDebugf("  -> flush: frame aligned, resuming normal playback")
-				s.resumeAt48 = -1
-			}
-
-			// Normal emission
-			if err := s.writePCMFrameTracked(PCMFrame{
-				Data:      s.fifo[:frameBytes],
-				PTS48:     pts,
-				NbSamples: 960,
-			}); err != nil {
-				return err
-			}
-			s.fifo = s.fifo[frameBytes:]
-
-			s.totalSamplesProduced += 960
+		if err := s.emitFifoFrames("flush"); err != nil {
+			return err
 		}
 	}
 	return nil
