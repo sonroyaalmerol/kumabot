@@ -1384,6 +1384,7 @@ func (p *Player) consumePackets(
 
 	firstPacket := true
 	droppedCount := 0
+	packetCount := 0
 
 	for {
 		pkt, ok := sess.buf.Pop(sess.ctx)
@@ -1411,12 +1412,29 @@ func (p *Player) consumePackets(
 		select {
 		case <-sess.ctx.Done():
 			sess.buf.Release(pkt.data)
-			dropTimer.Stop()
+			if !dropTimer.Stop() {
+				select {
+				case <-dropTimer.C:
+				default:
+				}
+			}
 			return
 		case vc.OpusSend <- pkt.data:
-			dropTimer.Stop()
+			if !dropTimer.Stop() {
+				select {
+				case <-dropTimer.C:
+				default:
+				}
+			}
 			updatePosition(pkt.pts48)
 			droppedCount = 0
+			packetCount++
+			// Periodically re-send Speaking(true) every 500 packets (10 seconds)
+			// to ensure Discord knows we are speaking even if discordgo reconnected
+			// and silently lost its VoiceServer speaking state.
+			if packetCount%500 == 0 {
+				go vc.Speaking(true)
+			}
 		case <-dropTimer.C:
 			sess.buf.Release(pkt.data)
 			droppedCount++
