@@ -24,11 +24,19 @@ import (
 
 const DefaultVolume = 100
 
+// pcmStreamer abstracts the PCM audio source so playSession can be tested
+// without a real FFmpeg stream.
+type pcmStreamer interface {
+	Stdout() io.Reader
+	ReconnectCh() <-chan stream.ReconnectSignal
+	Close()
+}
+
 type Player struct {
-	cfg     *config.Config
-	repo    *repository.Repo
-	cache   *cache.FileCache
-	guildID string
+	cfg      *config.Config
+	repo     *repository.Repo
+	cache    *cache.FileCache
+	guildID  string
 	onRemove func() // called when player is fully disconnected
 
 	opCtx    context.Context
@@ -73,7 +81,7 @@ type playSession struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	pcm *stream.PCMStreamer
+	pcm pcmStreamer
 	enc *stream.Encoder
 	buf *opusBuffer
 
@@ -322,10 +330,7 @@ func (p *Player) Add(song SongMetadata, immediate bool) *SongMetadata {
 		return replaced
 	}
 
-	insertAt := max(p.Qpos+1, 0)
-	if insertAt > len(p.SongQueue) {
-		insertAt = len(p.SongQueue)
-	}
+	insertAt := min(max(p.Qpos+1, 0), len(p.SongQueue))
 
 	// insert while preserving order
 	p.SongQueue = append(p.SongQueue, SongMetadata{})      // grow by one
@@ -1129,6 +1134,9 @@ func (p *Player) stopPlayLocked() {
 
 	// cancel first so the loop stops
 	sess.cancel()
+	// force-unblock the producer (readPCMFrame) and consumer (Pop)
+	sess.pcm.Close()
+	sess.buf.Close()
 
 	// wait for sender goroutine to exit without holding the lock
 	done := sess.doneCh
@@ -1217,11 +1225,12 @@ func (p *Player) sendLoop(
 	sess *playSession,
 ) {
 	defer func() {
-		sess.producerWg.Wait()
-
-		sess.buf.Close()
-		stream.PutPooledEncoder(sess.enc)
+		// Unblock producer and consumer first so goroutines can exit promptly.
 		sess.pcm.Close()
+		sess.buf.Close()
+
+		sess.producerWg.Wait()
+		stream.PutPooledEncoder(sess.enc)
 		sess.cancel()
 		close(sess.doneCh)
 	}()
@@ -1402,7 +1411,13 @@ func (p *Player) consumePackets(
 			waitTimer.Reset(d)
 			select {
 			case <-sess.ctx.Done():
-				waitTimer.Stop()
+				if !waitTimer.Stop() {
+					select {
+					case <-waitTimer.C:
+					default:
+					}
+				}
+				sess.buf.Release(pkt.data)
 				return
 			case <-waitTimer.C:
 			}

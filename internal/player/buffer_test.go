@@ -13,10 +13,10 @@ var benchmarkOpusPacket = make([]byte, 120) // typical compressed opus frame
 // Ring buffer usable capacity is maxSize-1, so we use n-1 items.
 func warmupPool(ob *opusBuffer, n int) {
 	cap := n - 1 // ring buffer reserves 1 slot
-	for i := 0; i < cap; i++ {
+	for i := range cap {
 		ob.Push(benchmarkOpusPacket, int64(i), time.Now())
 	}
-	for i := 0; i < cap; i++ {
+	for range cap {
 		pkt, _ := ob.Pop(context.Background())
 		ob.Release(pkt.data)
 	}

@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const popPollInterval = 20 * time.Millisecond
+
 // typedPool is a generic, type-safe pool that avoids sync.Pool's interface boxing.
 type typedPool[T any] struct {
 	mu    sync.Mutex
@@ -39,7 +41,6 @@ type opusBuffer struct {
 	writePos int
 	closed   bool
 	eos      bool
-	notEmpty *sync.Cond
 	pool     typedPool[[]byte]
 }
 
@@ -50,15 +51,13 @@ type bufferedPacket struct {
 }
 
 func newOpusBuffer(maxPackets int) *opusBuffer {
-	ob := &opusBuffer{
+	return &opusBuffer{
 		packets: make([]bufferedPacket, maxPackets),
 		maxSize: maxPackets,
 		pool: typedPool[[]byte]{
 			newFn: func() []byte { return make([]byte, 0, 200) },
 		},
 	}
-	ob.notEmpty = sync.NewCond(&ob.mu)
-	return ob
 }
 
 func (ob *opusBuffer) Push(data []byte, pts48 int64, targetTS time.Time) bool {
@@ -90,16 +89,14 @@ func (ob *opusBuffer) Push(data []byte, pts48 int64, targetTS time.Time) bool {
 		targetTS: targetTS,
 	}
 	ob.writePos = (ob.writePos + 1) % ob.maxSize
-	ob.notEmpty.Signal()
 	return true
 }
 
 func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
-	ob.mu.Lock()
-	defer ob.mu.Unlock()
-
 	for {
+		ob.mu.Lock()
 		if ob.closed {
+			ob.mu.Unlock()
 			return bufferedPacket{}, false
 		}
 
@@ -108,14 +105,28 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 			pkt := ob.packets[ob.readPos]
 			ob.packets[ob.readPos] = bufferedPacket{}
 			ob.readPos = (ob.readPos + 1) % ob.maxSize
+			ob.mu.Unlock()
 			return pkt, true
 		}
 
 		if ob.eos {
+			ob.mu.Unlock()
 			return bufferedPacket{}, false
 		}
+		ob.mu.Unlock()
 
-		ob.notEmpty.Wait()
+		timer := time.NewTimer(popPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return bufferedPacket{}, false
+		case <-timer.C:
+		}
 	}
 }
 
@@ -136,7 +147,6 @@ func (ob *opusBuffer) MarkEOS() {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	ob.eos = true
-	ob.notEmpty.Broadcast()
 }
 
 func (ob *opusBuffer) Close() {
@@ -150,5 +160,4 @@ func (ob *opusBuffer) Close() {
 			ob.packets[i] = bufferedPacket{}
 		}
 	}
-	ob.notEmpty.Broadcast()
 }

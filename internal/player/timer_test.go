@@ -10,16 +10,16 @@ func TestConsumePacketsTimerLeak(t *testing.T) {
 	if !dropTimer.Stop() {
 		<-dropTimer.C
 	}
-	
+
 	droppedCount := 0
-	
+
 	// Simulate sending 100 packets
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		dropTimer.Reset(1 * time.Millisecond)
-		
+
 		// Wait long enough for dropTimer to fire
 		time.Sleep(2 * time.Millisecond)
-		
+
 		// If OpusSend is ready, it could be selected even if dropTimer is fired.
 		// Let's force OpusSend to be selected to trigger the Stop() bug.
 		// We'll manually call Stop() without draining.
@@ -29,7 +29,7 @@ func TestConsumePacketsTimerLeak(t *testing.T) {
 			default:
 			}
 		}
-		
+
 		// Now simulate the NEXT iteration where OpusSend might block slightly
 		dropTimer.Reset(1 * time.Millisecond)
 		select {
@@ -46,7 +46,7 @@ func TestConsumePacketsTimerLeak(t *testing.T) {
 			droppedCount++
 		}
 	}
-	
+
 	if droppedCount > 0 {
 		t.Fatalf("Dropped %d packets due to timer leak!", droppedCount)
 	}
