@@ -1134,9 +1134,6 @@ func (p *Player) stopPlayLocked() {
 
 	// cancel first so the loop stops
 	sess.cancel()
-	// force-unblock the producer (readPCMFrame) and consumer (Pop)
-	sess.pcm.Close()
-	sess.buf.Close()
 
 	// wait for sender goroutine to exit without holding the lock
 	done := sess.doneCh

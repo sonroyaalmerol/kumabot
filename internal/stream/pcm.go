@@ -48,7 +48,7 @@ type PCMStreamer struct {
 	firstPTS48   int64
 	inFmt        astiav.SampleFormat
 
-	fifo        []byte
+	fifo          []byte
 	interleaveBuf []byte // reused for planar→interleaved conversion
 
 	inputURL string
@@ -234,28 +234,37 @@ func (s *PCMStreamer) Close() {
 	if s.pw != nil && !s.writerClosed {
 		_ = s.pw.Close()
 	}
-	if s.srcFrame != nil {
-		s.srcFrame.Free()
-	}
-	if s.dstFrame != nil {
-		s.dstFrame.Free()
-	}
-	if s.swr != nil {
-		s.swr.Free()
-	}
-	if s.decCtx != nil {
-		s.decCtx.Free()
-	}
-	if s.fc != nil {
-		s.fc.CloseInput()
-		s.fc.Free()
-	}
+	// C resources are freed by run()'s defer after it exits; we must NOT
+	// free them here because Close() may be called while run() is still
+	// active (e.g. sendLoop closes the pipe to unblock the producer).
 }
 
 func (s *PCMStreamer) run(ctx context.Context, seek, to *int) {
 	defer func() {
 		s.writerClosed = true
 		_ = s.pw.Close()
+
+		if s.srcFrame != nil {
+			s.srcFrame.Free()
+			s.srcFrame = nil
+		}
+		if s.dstFrame != nil {
+			s.dstFrame.Free()
+			s.dstFrame = nil
+		}
+		if s.swr != nil {
+			s.swr.Free()
+			s.swr = nil
+		}
+		if s.decCtx != nil {
+			s.decCtx.Free()
+			s.decCtx = nil
+		}
+		if s.fc != nil {
+			s.fc.CloseInput()
+			s.fc.Free()
+			s.fc = nil
+		}
 	}()
 
 	if seek != nil && *seek > 0 {
