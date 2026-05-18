@@ -1153,8 +1153,6 @@ func (p *Player) sendLoop(
 	}()
 
 	// Wait for voice ready
-	readyTimer := time.NewTimer(100 * time.Millisecond)
-	defer readyTimer.Stop()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if vc == nil {
@@ -1166,21 +1164,8 @@ func (p *Player) sendLoop(
 		if vc.OpusRecv == nil {
 			vc.OpusRecv = make(chan *discordgo.Packet, 2)
 		}
-		if vc.OpusSend != nil {
-			break
-		}
-		readyTimer.Reset(100 * time.Millisecond)
-		select {
-		case <-sess.ctx.Done():
-			if !readyTimer.Stop() {
-				select {
-				case <-readyTimer.C:
-				default:
-				}
-			}
-			return
-		case <-readyTimer.C:
-		}
+		// Voice connection is ready once OpusSend is non-nil (just set above).
+		break
 	}
 	if vc == nil || vc.OpusSend == nil {
 		return

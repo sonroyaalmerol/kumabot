@@ -594,9 +594,10 @@ func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionC
 		slog.Debug("stop command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if player.StatusPub() != plib.StatusPlaying {
+	status := player.StatusPub()
+	if status != plib.StatusPlaying && status != plib.StatusPaused {
 		h.reply(s, i, "not currently playing anything", true)
-		slog.Debug("stop command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.StatusPub())
+		slog.Debug("stop command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", status)
 		return
 	}
 	player.Stop()

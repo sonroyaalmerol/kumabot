@@ -164,11 +164,13 @@ func (c *ComponentHandler) handleRadio(s *discordgo.Session, i *discordgo.Intera
 }
 
 func (c *ComponentHandler) handleQueuePage(s *discordgo.Session, i *discordgo.InteractionCreate, guildID string, delta int) {
-	// Extract current page from embed footer
+	// Extract current page from embed fields
 	currentPage := 1
 	for _, e := range i.Message.Embeds {
-		if e.Footer != nil {
-			_, _ = fmt.Sscanf(e.Footer.Text, "Page %d", &currentPage)
+		for _, f := range e.Fields {
+			if f.Name == "Page" {
+				_, _ = fmt.Sscanf(f.Value, "%d out of %d", &currentPage, new(int))
+			}
 		}
 	}
 	newPage := max(currentPage+delta, 1)

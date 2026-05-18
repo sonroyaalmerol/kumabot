@@ -61,8 +61,9 @@ func GetYouTubeAndSpotifySuggestions(ctx context.Context, query string, sp *spot
 		albums, tracks, err := sp.SearchAlbumsAndTracks(ctx, query, maxSP)
 		if err == nil {
 			// make room
-			if len(out) > limit-len(albums)-len(tracks) {
-				out = out[:limit-len(albums)-len(tracks)]
+			room := max(limit-len(albums)-len(tracks), 0)
+			if len(out) > room {
+				out = out[:room]
 			}
 			for _, a := range albums {
 				artist := ""
