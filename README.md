@@ -11,7 +11,7 @@ It is a high-performance, low-footprint Discord music bot written in Go, utilizi
 - Native Audio Pipeline: Direct integration with libavcodec and libavformat for resampling and encoding.
 - Jitter Management: Custom opusBuffer ensures smooth playback across varying network conditions.
 - Query Resolution: Supports YouTube, Spotify metadata resolution, and HLS streams.
-- Persistence: Per-guild configurations and user favorites stored via SQLite.
+- Persistence: Per-guild configurations, queue state, and user favorites stored via SQLite.
 
 ## Configuration (Environment Variables)
 
@@ -37,12 +37,11 @@ The bot is configured via environment variables.
 | SPOTIFY_CLIENT_ID     | Client ID for Spotify link resolution.     | ""      |
 | SPOTIFY_CLIENT_SECRET | Client Secret for Spotify link resolution. | ""      |
 
-### Data & Cache
+### Data
 
-| Variable    | Description                                | Default          |
-| :---------- | :----------------------------------------- | :--------------- |
-| DATA_DIR    | Root directory for DB, cookies, and cache. | ./data           |
-| CACHE_LIMIT | Max size of the audio cache in bytes.      | 2147483648 (2GB) |
+| Variable | Description                        | Default |
+| :------- | :--------------------------------- | :------ |
+| DATA_DIR | Root directory for DB and cookies. | ./data  |
 
 ### SponsorBlock
 
@@ -159,17 +158,16 @@ services:
       # Optional Spotify (for Spotify URL/auto-complete features)
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      # Data/cache directories inside container
+      # Data directory inside container
       - DATA_DIR=/app/data
       # Optional bot presence
       - BOT_STATUS=online
       - BOT_ACTIVITY=music
       # Optional: register slash commands on the bot (global) vs guilds
       - REGISTER_COMMANDS_ON_BOT=false
-      # Cache limit (bytes). Example ~2GB
-      - CACHE_LIMIT=2147483648
+
       # SponsorBlock
-      - ENABLE_SPONSORBLOCK=true
+      - ENABLE_SPONSORBLOCK=false
       - SPONSORBLOCK_TIMEOUT=5
     volumes:
       - ./data:/app/data
