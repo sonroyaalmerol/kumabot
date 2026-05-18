@@ -664,16 +664,19 @@ func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	embed := plib.BuildPlayingEmbed(player)
+	components := plib.PlayingComponents(player)
 
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
+			Embeds:     []*discordgo.MessageEmbed{embed},
+			Components: components,
 		},
 	})
 	if err != nil {
 		_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Embeds: &[]*discordgo.MessageEmbed{embed},
+			Embeds:     &[]*discordgo.MessageEmbed{embed},
+			Components: &components,
 		})
 	}
 }

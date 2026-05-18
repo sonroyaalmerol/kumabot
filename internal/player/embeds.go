@@ -24,6 +24,23 @@ func songLink(s SongMetadata) string {
 	return fmt.Sprintf("[%s](%s)", s.Title, link)
 }
 
+// Brand colors — single source of truth for embed accent colors.
+const (
+	ColorPlaying = 0x2ECC71 // Bright green — active playback
+	ColorPaused  = 0xE74C3C // Red — paused / idle
+	ColorQueue   = 0x2ECC71 // Matches playing state; changes in BuildQueueEmbed
+	ColorIdle    = 0x95A5A6 // Muted grey — nothing playing
+	ColorBrand   = 0x1DB954 // Kuma brand green (Spotify-ish)
+
+	// Wrapped slide colors — derived from brand palette
+	ColorWrappedHeader   = 0x1DB954
+	ColorWrappedSongs    = 0x2ECC71
+	ColorWrappedArtists  = 0x9B59B6
+	ColorWrappedDJs      = 0x3498DB
+	ColorWrappedHabits   = 0xE74C3C
+	ColorWrappedActivity = 0x1ABC9C
+)
+
 func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 	const maxDesc = 4096
 
@@ -32,7 +49,7 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 		return &discordgo.MessageEmbed{
 			Title:       "Nothing Playing",
 			Description: "No playing song found",
-			Color:       0x992222,
+			Color:       ColorIdle,
 		}
 	}
 
@@ -117,18 +134,20 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 		}
 	}
 
-	color := 0x006400
+	color := ColorPlaying
 	title := "Now Playing"
 	if status != StatusPlaying {
-		color = 0x8B0000
+		color = ColorPaused
 		title = "Paused"
 	}
 
-	footer := fmt.Sprintf("Source: %s", cur.Artist)
-	if cur.Playlist != nil {
-		footer += " (" + cur.Playlist.Title + ")"
+	footer := "kumabot"
+	if cur.Artist != "" {
+		footer = fmt.Sprintf("Source: %s • kumabot", cur.Artist)
+		if cur.Playlist != nil {
+			footer = fmt.Sprintf("Source: %s (%s) • kumabot", cur.Artist, cur.Playlist.Title)
+		}
 	}
-	footer += " • kumabot"
 
 	embed := &discordgo.MessageEmbed{
 		Title:       title,
@@ -147,28 +166,37 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 // PlayingComponents returns the playback control button rows for the now-playing embed.
 func PlayingComponents(p *Player) []discordgo.MessageComponent {
 	pauseLabel := "⏸"
+	pauseStyle := discordgo.SecondaryButton
 	if p.StatusPub() != StatusPlaying {
 		pauseLabel = "▶"
+		pauseStyle = discordgo.SuccessButton
 	}
+
 	loopStyle := discordgo.SecondaryButton
 	if p.LoopSongPub() {
-		loopStyle = discordgo.PrimaryButton
+		loopStyle = discordgo.SuccessButton
 	}
 	radioStyle := discordgo.SecondaryButton
 	if p.IsRadioMode() {
-		radioStyle = discordgo.PrimaryButton
+		radioStyle = discordgo.SuccessButton
 	}
+	shuffleStyle := discordgo.SecondaryButton
+	if p.ShuffleModePub() {
+		shuffleStyle = discordgo.SuccessButton
+	}
+
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{Label: "⏮", Style: discordgo.SecondaryButton, CustomID: "kuma:prev"},
-				discordgo.Button{Label: pauseLabel, Style: discordgo.PrimaryButton, CustomID: "kuma:pause"},
+				discordgo.Button{Label: pauseLabel, Style: pauseStyle, CustomID: "kuma:pause"},
 				discordgo.Button{Label: "⏭", Style: discordgo.SecondaryButton, CustomID: "kuma:next"},
 			},
 		},
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{Label: "🔁", Style: loopStyle, CustomID: "kuma:loop"},
+				discordgo.Button{Label: "🔀", Style: shuffleStyle, CustomID: "kuma:shuffle"},
 				discordgo.Button{Label: "📻", Style: radioStyle, CustomID: "kuma:radio"},
 				discordgo.Button{Label: "⏹", Style: discordgo.DangerButton, CustomID: "kuma:stop"},
 			},
@@ -186,6 +214,12 @@ func BuildQueueEmbed(
 	cur := p.GetCurrent()
 	if cur == nil {
 		return nil, fmt.Errorf("queue is empty")
+	}
+
+	status := p.StatusPub()
+	color := ColorPlaying
+	if status != StatusPlaying {
+		color = ColorPaused
 	}
 	total := p.QueueSize()
 	maxPage := (total + 1 + pageSize - 1) / pageSize
@@ -283,9 +317,9 @@ func BuildQueueEmbed(
 	}
 
 	embed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("Now Playing%s", loop),
+		Title:       fmt.Sprintf("Queue%s", loop),
 		Description: desc,
-		Color:       0x006400,
+		Color:       color,
 		Fields: []*discordgo.MessageEmbedField{
 			{
 				Name:   "In queue",
@@ -315,12 +349,7 @@ func BuildQueueEmbed(
 			},
 		},
 		Footer: &discordgo.MessageEmbedFooter{
-			Text: fmt.Sprintf("Source: %s %s", cur.Artist, func() string {
-				if cur.Playlist != nil {
-					return "(" + cur.Playlist.Title + ")"
-				}
-				return ""
-			}()),
+			Text: "kumabot",
 		},
 	}
 	if cur.Thumbnail != "" {

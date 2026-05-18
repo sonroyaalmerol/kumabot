@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
+	plib "github.com/sonroyaalmerol/kumabot/internal/player"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
 	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
@@ -104,7 +105,7 @@ func buildWrappedEmbeds(guildName string, stats *repository.WrappedStats) []*dis
 	embeds = append(embeds, &discordgo.MessageEmbed{
 		Title:       "🎶 Your Year in Music",
 		Description: headerDesc,
-		Color:       0x1DB954,
+		Color:       plib.ColorWrappedHeader,
 	})
 
 	if stats.TotalPlays == 0 {
@@ -136,7 +137,7 @@ func buildWrappedEmbeds(guildName string, stats *repository.WrappedStats) []*dis
 	embeds = append(embeds, &discordgo.MessageEmbed{
 		Title:       "🔥 Top Songs",
 		Description: songsDesc,
-		Color:       0xFF6B35,
+		Color:       plib.ColorWrappedSongs,
 	})
 
 	// --- Slide 3: Top Artists ---
@@ -160,7 +161,7 @@ func buildWrappedEmbeds(guildName string, stats *repository.WrappedStats) []*dis
 		embeds = append(embeds, &discordgo.MessageEmbed{
 			Title:       "🎤 Top Artists",
 			Description: artistsDesc,
-			Color:       0x9B59B6,
+			Color:       plib.ColorWrappedArtists,
 		})
 	}
 
@@ -185,7 +186,7 @@ func buildWrappedEmbeds(guildName string, stats *repository.WrappedStats) []*dis
 		embeds = append(embeds, &discordgo.MessageEmbed{
 			Title:       "🎧 Top DJs",
 			Description: djsDesc,
-			Color:       0x3498DB,
+			Color:       plib.ColorWrappedDJs,
 		})
 	}
 
@@ -208,7 +209,7 @@ func buildWrappedEmbeds(guildName string, stats *repository.WrappedStats) []*dis
 	embeds = append(embeds, &discordgo.MessageEmbed{
 		Title:       "🧬 Your Listening DNA",
 		Description: habitsDesc,
-		Color:       0xE74C3C,
+		Color:       plib.ColorWrappedHabits,
 	})
 
 	// --- Slide 6: Activity Graph (text-based bar chart) ---
@@ -246,7 +247,7 @@ func buildWrappedEmbeds(guildName string, stats *repository.WrappedStats) []*dis
 		embeds = append(embeds, &discordgo.MessageEmbed{
 			Title:       "📊 Listening Activity",
 			Description: graphDesc,
-			Color:       0x2ECC71,
+			Color:       plib.ColorWrappedActivity,
 		})
 	}
 
@@ -268,7 +269,7 @@ func buildUserWrappedEmbeds(userName string, stats *repository.WrappedStats) []*
 	embeds = append(embeds, &discordgo.MessageEmbed{
 		Title:       "🎶 Your Wrapped",
 		Description: headerDesc,
-		Color:       0x1DB954,
+		Color:       plib.ColorWrappedHeader,
 	})
 
 	if stats.TotalPlays == 0 {
@@ -301,7 +302,7 @@ func buildUserWrappedEmbeds(userName string, stats *repository.WrappedStats) []*
 		embeds = append(embeds, &discordgo.MessageEmbed{
 			Title:       "🔥 Your Top Songs",
 			Description: songsDesc,
-			Color:       0xFF6B35,
+			Color:       plib.ColorWrappedSongs,
 		})
 	}
 
@@ -326,7 +327,7 @@ func buildUserWrappedEmbeds(userName string, stats *repository.WrappedStats) []*
 		embeds = append(embeds, &discordgo.MessageEmbed{
 			Title:       "🎤 Your Top Artists",
 			Description: artistsDesc,
-			Color:       0x9B59B6,
+			Color:       plib.ColorWrappedArtists,
 		})
 	}
 
@@ -342,7 +343,7 @@ func buildUserWrappedEmbeds(userName string, stats *repository.WrappedStats) []*
 	embeds = append(embeds, &discordgo.MessageEmbed{
 		Title:       "🧬 Your Listening Personality",
 		Description: personalityDesc,
-		Color:       0xE74C3C,
+		Color:       plib.ColorWrappedHabits,
 	})
 
 	return embeds

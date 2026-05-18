@@ -20,6 +20,7 @@ const (
 	btnLoop      = "kuma:loop"
 	btnStop      = "kuma:stop"
 	btnRadio     = "kuma:radio"
+	btnShuffle   = "kuma:shuffle"
 	btnQueuePrev = "kuma:qprev"
 	btnQueueNext = "kuma:qnext"
 )
@@ -51,6 +52,8 @@ func (c *ComponentHandler) Handle(s *discordgo.Session, i *discordgo.Interaction
 		c.handleNext(s, i, guildID)
 	case btnLoop:
 		c.handleLoop(s, i, guildID)
+	case btnShuffle:
+		c.handleShuffle(s, i, guildID)
 	case btnStop:
 		c.handleStop(s, i, guildID)
 	case btnRadio:
@@ -133,6 +136,17 @@ func (c *ComponentHandler) handleLoop(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 	p.ToggleLoopSong()
+	embed := plib.BuildPlayingEmbed(p)
+	respondUpdateEmbed(s, i, embed, plib.PlayingComponents(p))
+}
+
+func (c *ComponentHandler) handleShuffle(s *discordgo.Session, i *discordgo.InteractionCreate, guildID string) {
+	p := c.player(guildID)
+	if p == nil {
+		respondEmpty(s, i)
+		return
+	}
+	p.ToggleShuffle()
 	embed := plib.BuildPlayingEmbed(p)
 	respondUpdateEmbed(s, i, embed, plib.PlayingComponents(p))
 }
