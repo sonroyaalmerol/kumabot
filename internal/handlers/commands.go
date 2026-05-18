@@ -589,14 +589,14 @@ func (h *CommandHandler) cmdPlay(s *discordgo.Session, i *discordgo.InteractionC
 
 func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
-	if player == nil || player.Conn == nil {
+	if player == nil || !player.ConnPub() {
 		h.reply(s, i, "not connected to voice", true)
 		slog.Debug("stop command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if player.Status != plib.StatusPlaying {
+	if player.StatusPub() != plib.StatusPlaying {
 		h.reply(s, i, "not currently playing anything", true)
-		slog.Debug("stop command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.Status)
+		slog.Debug("stop command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.StatusPub())
 		return
 	}
 	player.Stop()
@@ -606,7 +606,7 @@ func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionC
 
 func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
-	if player == nil || player.Conn == nil {
+	if player == nil || !player.ConnPub() {
 		h.reply(s, i, "not connected to voice", true)
 		slog.Debug("disconnect command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
@@ -891,7 +891,7 @@ func (h *CommandHandler) cmdLoop(s *discordgo.Session, i *discordgo.InteractionC
 		slog.Error("loop command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if player.Status == plib.StatusIdle {
+	if player.StatusPub() == plib.StatusIdle {
 		h.reply(s, i, "no song to loop!", true)
 		slog.Debug("loop command failed: player idle", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
@@ -1038,9 +1038,9 @@ func (h *CommandHandler) cmdPause(s *discordgo.Session, i *discordgo.Interaction
 		slog.Error("pause command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if player.Status != plib.StatusPlaying {
+	if player.StatusPub() != plib.StatusPlaying {
 		h.reply(s, i, "nothing is playing right now", true)
-		slog.Debug("pause command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.Status)
+		slog.Debug("pause command failed: not playing", "guildID", i.GuildID, "userID", userIDOf(i), "status", player.StatusPub())
 		return
 	}
 	if err := player.Pause(); err != nil {
@@ -1150,7 +1150,7 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 		slog.Error("resume command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	if player.Status == plib.StatusPlaying {
+	if player.StatusPub() == plib.StatusPlaying {
 		h.reply(s, i, "already playing! Use `/pause` first if you want to restart.", true)
 		slog.Debug("resume command failed: already playing", "guildID", i.GuildID, "userID", userIDOf(i))
 		return

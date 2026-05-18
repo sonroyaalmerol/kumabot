@@ -122,6 +122,13 @@ func (p *Player) StatusPub() PlayerStatus {
 	return p.Status
 }
 
+// ConnPub returns whether the player has an active voice connection.
+func (p *Player) ConnPub() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Conn != nil
+}
+
 // LoopSongPub returns the loop song state.
 func (p *Player) LoopSongPub() bool {
 	p.mu.Lock()
@@ -1126,10 +1133,10 @@ func (p *Player) scheduleIdleDisconnect() {
 
 	p.DisconnectTimer = time.AfterFunc(wait, func() {
 		p.mu.Lock()
-		defer p.mu.Unlock()
 
 		if p.IsSearching() {
 			p.DisconnectTimer.Reset(wait)
+			p.mu.Unlock()
 			return
 		}
 
@@ -1138,9 +1145,15 @@ func (p *Player) scheduleIdleDisconnect() {
 		if shouldDisconnect {
 			p.Conn = nil
 			p.ConnChannelID = ""
+		}
+		onRemove := p.onRemove
+		p.mu.Unlock()
+
+		// Do blocking I/O outside the lock to prevent deadlocks.
+		if shouldDisconnect && vc != nil {
 			_ = p.safeDisconnect(context.Background(), vc)
-			if p.onRemove != nil {
-				p.onRemove()
+			if onRemove != nil {
+				onRemove()
 			}
 		}
 	})

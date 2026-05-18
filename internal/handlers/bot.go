@@ -101,7 +101,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	dg.AddHandler(func(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		gid := vs.GuildID
 		player := b.pm.Peek(gid)
-		if player == nil || player.Conn == nil {
+		if player == nil || !player.ConnPub() {
 			return
 		}
 		set, err := b.repo.GetSettings(context.Background(), gid)
