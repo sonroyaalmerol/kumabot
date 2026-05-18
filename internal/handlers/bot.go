@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
@@ -37,6 +38,11 @@ func (b *Bot) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to create Discord session: %w", err)
 	}
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
+
+	// Enable discordgo voice logging for DAVE handshake diagnostics
+	if os.Getenv("DISCORD_DEBUG") != "" {
+		dg.LogLevel = discordgo.LogInformational
+	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		slog.Info("connected", "user", s.State.User.Username, "guilds", len(s.State.Guilds))
