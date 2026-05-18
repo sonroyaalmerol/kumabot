@@ -60,16 +60,13 @@ type PCMStreamer struct {
 	lastProducedPTS48 int64
 	producedMu        sync.Mutex
 
-	totalSamplesProduced  int64 // Total samples we've actually written
-	streamStartPTS48      int64 // PTS where stream actually starts (after skip)
-	streamStartDetermined bool
+	totalSamplesProduced int64 // Total samples we've actually written
+	streamStartPTS48     int64 // PTS where stream actually starts (after skip)
 }
 
 type ReconnectSignal struct {
 	LastSentPTS48 int64
 }
-
-var debugOnce int32
 
 func pcmDebugf(format string, args ...any) {
 	if debugOn() {

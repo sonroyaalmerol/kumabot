@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	ytdlp "github.com/lrstanley/go-ytdlp"
@@ -102,10 +101,6 @@ func PickMediaURL(info *YTDLPInfo) MediaURL {
 	return MediaURL{}
 }
 
-var (
-	installOnce sync.Once
-)
-
 // helpers to safely read pointer fields with defaults
 func s(ptr *string) string {
 	if ptr == nil {
@@ -174,8 +169,6 @@ func ytdlpDebugf(format string, args ...any) {
 
 // YtdlpGetInfo runs yt-dlp -J -f bestaudio/best URL.
 func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPInfo, error) {
-	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
-
 	cmd := ytdlp.New().
 		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
@@ -289,14 +282,12 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 // YtdlpGetRelated fetches YouTube's auto-generated "Radio" mix for a video using the RD playlist.
 // Returns up to limit related videos as flat entries.
 func YtdlpGetRelated(ctx context.Context, cfg *config.Config, videoID string, limit int) ([]YTDLPEntry, error) {
-	installOnce.Do(func() { _ = func() error { ytdlp.MustInstall(ctx, nil); return nil }() })
-
 	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", videoID, videoID)
 
 	cmd := ytdlp.New().
 		FlatPlaylist().
 		DumpJSON().
-		PlaylistEnd(limit)
+		PlaylistItems(fmt.Sprintf(":%d", limit))
 
 	if cfg.YouTubeCookiesPath != "" {
 		cmd = cmd.Cookies(cfg.YouTubeCookiesPath)
@@ -323,11 +314,11 @@ func YtdlpGetRelated(ctx context.Context, cfg *config.Config, videoID string, li
 			continue
 		}
 		entries = append(entries, YTDLPEntry{
-			Id:        item.ID,
-			Title:     s(item.Title),
-			Uploader:  s(item.Uploader),
-			Duration:  f(item.Duration),
-			IsLive:    b(item.IsLive),
+			Id:       item.ID,
+			Title:    s(item.Title),
+			Uploader: s(item.Uploader),
+			Duration: f(item.Duration),
+			IsLive:   b(item.IsLive),
 		})
 		if len(entries) >= limit {
 			break

@@ -69,23 +69,6 @@ func dprintf(format string, args ...any) {
 	}
 }
 
-func pcmRMS16LE(b []byte) float64 {
-	if len(b)%2 != 0 {
-		return 0
-	}
-	var sum float64
-	cnt := 0
-	for i := 0; i < len(b); i += 2 {
-		v := int16(uint16(b[i]) | (uint16(b[i+1]) << 8))
-		sum += float64(v) * float64(v)
-		cnt++
-	}
-	if cnt == 0 {
-		return 0
-	}
-	return sum / float64(cnt) // mean square (no sqrt needed for debug)
-}
-
 // NewEncoder creates an Opus encoder (libopus) at 48k stereo ~160kbps.
 func NewEncoder() (*Encoder, error) {
 	const (
@@ -193,30 +176,6 @@ func (e *Encoder) EncodeFrame(pcm []byte, onPacket OpusPacketHandler) error {
 		}
 		if err := onPacket(e.packet.Data()); err != nil {
 			return fmt.Errorf("packet handler error: %w", err)
-		}
-	}
-	return nil
-}
-
-func (e *Encoder) Flush(onPacket OpusPacketHandler) error {
-	dprintf("flushing encoder")
-	if err := e.cc.SendFrame(nil); err != nil {
-		if astErr, ok := err.(astiav.Error); ok && astErr.Is(astiav.ErrEof) {
-			return nil
-		}
-		return fmt.Errorf("failed to send flush frame: %w", err)
-	}
-	for {
-		e.packet.Unref()
-		if err := e.cc.ReceivePacket(e.packet); err != nil {
-			if astErr, ok := err.(astiav.Error); ok && (astErr.Is(astiav.ErrEagain) || astErr.Is(astiav.ErrEof)) {
-				break
-			}
-			return fmt.Errorf("failed to receive packet during flush: %w", err)
-		}
-		dprintf("flush packet: size=%d", e.packet.Size())
-		if err := onPacket(e.packet.Data()); err != nil {
-			return fmt.Errorf("packet handler error during flush: %w", err)
 		}
 	}
 	return nil

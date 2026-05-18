@@ -9,22 +9,6 @@ import (
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 )
 
-type ytdlpPlaylistItem struct {
-	Id         string `json:"id"`
-	Title      string `json:"title"`
-	Uploader   string `json:"uploader"`
-	Duration   int    `json:"duration"`
-	IsLive     bool   `json:"is_live"`
-	Thumbnails []struct {
-		Url string `json:"url"`
-	} `json:"thumbnails"`
-}
-type ytdlpPlaylistJSON struct {
-	Entries    []ytdlpPlaylistItem `json:"entries"`
-	Title      string              `json:"title"`
-	WebpageUrl string              `json:"webpage_url"`
-}
-
 func YtdlpPlaylist(ctx context.Context, cfg *config.Config, url string) ([]*YTDLPInfo, error) {
 	cmd := ytdlp.New().
 		FlatPlaylist().

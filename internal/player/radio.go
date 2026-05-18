@@ -168,13 +168,6 @@ func jaccardSimilarity(a, b string) float64 {
 	return float64(intersection) / float64(union)
 }
 
-// isSameTitle determines if two raw YouTube titles refer to the same song.
-// It handles covers, remixes, live versions, lyric videos, etc.
-// It also handles inconsistent YouTube title formats where artist/title order varies.
-func isSameTitle(rawA, rawB string) bool {
-	return partsSimilar(canonicalTitleParts(rawA), canonicalTitleParts(rawB))
-}
-
 // partsSimilar checks if any pair of canonical title parts matches.
 func partsSimilar(partsA, partsB []string) bool {
 	for _, a := range partsA {

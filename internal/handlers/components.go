@@ -168,13 +168,10 @@ func (c *ComponentHandler) handleQueuePage(s *discordgo.Session, i *discordgo.In
 	currentPage := 1
 	for _, e := range i.Message.Embeds {
 		if e.Footer != nil {
-			fmt.Sscanf(e.Footer.Text, "Page %d", &currentPage)
+			_, _ = fmt.Sscanf(e.Footer.Text, "Page %d", &currentPage)
 		}
 	}
-	newPage := currentPage + delta
-	if newPage < 1 {
-		newPage = 1
-	}
+	newPage := max(currentPage+delta, 1)
 
 	ctx := context.Background()
 	_, _ = c.repo.UpsertSettings(ctx, guildID)

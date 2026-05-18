@@ -207,9 +207,11 @@ func BuildQueueEmbed(
 	}
 
 	totalLen := 0
-	for _, s := range p.Queue() {
+	p.mu.Lock()
+	for _, s := range p.SongQueue[p.Qpos+1:] {
 		totalLen += s.Length
 	}
+	p.mu.Unlock()
 
 	desc := fmt.Sprintf(
 		"**%s**\nRequested by: <@%s>\n\n",
@@ -372,4 +374,3 @@ func totalLenStr(sec int) string {
 	}
 	return utils.PrettyTime(sec)
 }
-
