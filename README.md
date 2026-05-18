@@ -1,5 +1,6 @@
 # Kumabot
-[![](https://img.shields.io/codacy/grade/6a8e207cf98246169e633d6f22da9d9c)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![Docker Stars](https://img.shields.io/docker/stars/sonroyaalmerol/kumabot.svg)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![Docker Pulls](https://img.shields.io/docker/pulls/sonroyaalmerol/kumabot.svg)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![](https://img.shields.io/docker/image-size/sonroyaalmerol/kumabot)](https://img.shields.io/docker/image-size/sonroyaalmerol/kumabot)  [![Release Images](https://github.com/sonroyaalmerol/kumabot/actions/workflows/release.yml/badge.svg)](https://github.com/sonroyaalmerol/kumabot/actions/workflows/release.yml)
+
+[![](https://img.shields.io/codacy/grade/6a8e207cf98246169e633d6f22da9d9c)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![Docker Stars](https://img.shields.io/docker/stars/sonroyaalmerol/kumabot.svg)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![Docker Pulls](https://img.shields.io/docker/pulls/sonroyaalmerol/kumabot.svg)](https://hub.docker.com/r/sonroyaalmerol/kumabot/) [![](https://img.shields.io/docker/image-size/sonroyaalmerol/kumabot)](https://img.shields.io/docker/image-size/sonroyaalmerol/kumabot) [![Release Images](https://github.com/sonroyaalmerol/kumabot/actions/workflows/release.yml/badge.svg)](https://github.com/sonroyaalmerol/kumabot/actions/workflows/release.yml)
 
 Tired of JS-based bots breaking after every minor update (with its `node_modules` dependency hell), or Java-based bots consuming too much memory for a simple utility? Kumabot is built for people who want a "set it and forget it" experience.
 
@@ -17,50 +18,57 @@ It is a high-performance, low-footprint Discord music bot written in Go, utilizi
 The bot is configured via environment variables.
 
 ### Discord Auth
-| Variable | Description | Default |
-| :--- | :--- | :--- |
+
+| Variable      | Description             | Default  |
+| :------------ | :---------------------- | :------- |
 | DISCORD_TOKEN | Your Discord Bot Token. | Required |
 
 ### YouTube Auth
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| YOUTUBE_PO_TOKEN | Proof of Origin token to bypass bot detection. | "" |
+
+| Variable             | Description                                     | Default               |
+| :------------------- | :---------------------------------------------- | :-------------------- |
+| YOUTUBE_PO_TOKEN     | Proof of Origin token to bypass bot detection.  | ""                    |
 | YOUTUBE_COOKIES_PATH | Path to cookies.txt for YouTube authentication. | $DATA_DIR/cookies.txt |
 
 ### Spotify Auth
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| SPOTIFY_CLIENT_ID | Client ID for Spotify link resolution. | "" |
-| SPOTIFY_CLIENT_SECRET| Client Secret for Spotify link resolution. | "" |
+
+| Variable              | Description                                | Default |
+| :-------------------- | :----------------------------------------- | :------ |
+| SPOTIFY_CLIENT_ID     | Client ID for Spotify link resolution.     | ""      |
+| SPOTIFY_CLIENT_SECRET | Client Secret for Spotify link resolution. | ""      |
 
 ### Data & Cache
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| DATA_DIR | Root directory for DB, cookies, and cache. | ./data |
-| CACHE_LIMIT | Max size of the audio cache in bytes. | 2147483648 (2GB) |
+
+| Variable    | Description                                | Default          |
+| :---------- | :----------------------------------------- | :--------------- |
+| DATA_DIR    | Root directory for DB, cookies, and cache. | ./data           |
+| CACHE_LIMIT | Max size of the audio cache in bytes.      | 2147483648 (2GB) |
 
 ### SponsorBlock
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| ENABLE_SPONSORBLOCK | Enable skipping segments via SponsorBlock. | false |
-| SPONSORBLOCK_TIMEOUT | Timeout in minutes for API requests. | 5 |
+
+| Variable             | Description                                | Default |
+| :------------------- | :----------------------------------------- | :------ |
+| ENABLE_SPONSORBLOCK  | Enable skipping segments via SponsorBlock. | false   |
+| SPONSORBLOCK_TIMEOUT | Timeout in minutes for API requests.       | 5       |
 
 ### Bot Behavior
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| BOT_STATUS | Bot presence status (online, idle, dnd). | online |
-| BOT_ACTIVITY | Text to display in the bot's status. | music |
-| REGISTER_COMMANDS_ON_BOT | true for global commands; false for per-guild. | false |
+
+| Variable                 | Description                                    | Default |
+| :----------------------- | :--------------------------------------------- | :------ |
+| BOT_STATUS               | Bot presence status (online, idle, dnd).       | online  |
+| BOT_ACTIVITY             | Text to display in the bot's status.           | music   |
+| REGISTER_COMMANDS_ON_BOT | true for global commands; false for per-guild. | false   |
 
 ## Supported Commands
 
 ### Playback Commands
+
 - **/play**: Play a song (YouTube URL/ID, HLS URL, or search).
-    - `query`: The song to search for or URL.
-    - `immediate`: Add the song to the front of the queue.
-    - `shuffle`: Shuffle the tracks being added (if playlist).
-    - `split`: Split the video into separate tracks based on chapters.
-    - `skip`: Skip the current song and play this immediately.
+  - `query`: The song to search for or URL.
+  - `immediate`: Add the song to the front of the queue.
+  - `shuffle`: Shuffle the tracks being added (if playlist).
+  - `split`: Split the video into separate tracks based on chapters.
+  - `skip`: Skip the current song and play this immediately.
 - **/pause**: Pause the current playback.
 - **/resume**: Resume the current playback.
 - **/replay**: Replay the current song from the beginning.
@@ -68,32 +76,41 @@ The bot is configured via environment variables.
 - **/unskip**: Go back to the previous song in the queue.
 - **/stop**: Stop playback and clear the entire queue.
 - **/fseek**: Seek forward in the current song.
-    - `time`: Seconds or duration string (e.g., `1m30s`).
+  - `time`: Seconds or duration string (e.g., `1m30s`).
 
 ### Queue Management
+
 - **/queue**: Show the current queue with pagination.
-    - `page`: Page number to view.
-    - `page-size`: Number of items per page (max 30).
+  - `page`: Page number to view.
+  - `page-size`: Number of items per page (max 30).
 - **/now-playing**: Show detailed information about the currently playing track.
 - **/clear**: Clear all songs from the queue except the one currently playing.
 - **/move**: Move a song's position within the queue.
-    - `from`: Current position of the song.
-    - `to`: New target position for the song.
+  - `from`: Current position of the song.
+  - `to`: New target position for the song.
 - **/remove**: Remove songs from the queue.
-    - `position`: Position of the song to remove.
-    - `range`: Number of songs to remove starting from that position.
+  - `position`: Position of the song to remove.
+  - `range`: Number of songs to remove starting from that position.
 - **/shuffle**: Toggle shuffling for the entire queue.
 - **/loop**: Toggle looping for the current song.
 - **/loop-queue**: Toggle looping for the entire queue.
 - **/disconnect**: Pause playback and disconnect the bot from the voice channel.
+- **/resume-queue**: Restore and play the last saved queue from a previous session.
+
+### Wrapped
+
+- **/wrapped server**: View the server's listening stats for the year (Spotify Wrapped style).
+- **/wrapped me**: View your personal listening stats for the year.
 
 ### Favorites
+
 - **/favorites use**: Play a saved favorite.
 - **/favorites list**: List all saved favorites for the guild.
 - **/favorites create**: Save a query as a favorite.
 - **/favorites remove**: Delete a saved favorite.
 
 ### Configuration
+
 - **/config get**: View current guild settings.
 - **/config set-playlist-limit**: Set maximum tracks allowed when adding playlists.
 - **/config set-wait-after-queue-empties**: Set how long the bot waits before leaving an empty queue.
@@ -108,7 +125,9 @@ The bot is configured via environment variables.
 YouTube enforces Proof of Origin (PO) tokens to attest that requests come from a genuine client. Check out [yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide) guide for a more accurate direction.
 
 ### 1. Obtaining a PO Token
+
 Manual Extraction:
+
 1. Open a browser and navigate to YouTube Music.
 2. Open Developer Tools (F12) and go to the Network tab.
 3. Filter by v1/player.
@@ -117,6 +136,7 @@ Manual Extraction:
 6. Set this as your YOUTUBE_PO_TOKEN environment variable.
 
 ### 2. Exporting Cookies
+
 1. Open a Private/Incognito browser window.
 2. Log in to YouTube.
 3. Export the cookies in Netscape format using an extension.
@@ -126,6 +146,7 @@ Manual Extraction:
 ## Deployment
 
 ### Docker
+
 ```yaml
 services:
   kumabot:
@@ -155,6 +176,7 @@ services:
 ```
 
 ### Manual Build
+
 ```bash
 sudo apt-get install pkg-config libavdevice-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libopus-dev
 export CGO_ENABLED=1

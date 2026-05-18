@@ -24,6 +24,7 @@ func (pm *PlayerManager) Get(cfg *config.Config, repo *repository.Repo, cache *c
 		return p
 	}
 	p := NewPlayer(cfg, repo, cache, guildID)
+	p.RestoreState()
 	p.onRemove = func() { pm.Remove(guildID) }
 	pm.Players[guildID] = p
 	return p

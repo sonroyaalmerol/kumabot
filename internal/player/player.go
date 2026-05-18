@@ -223,6 +223,8 @@ func (p *Player) Connect(ctx context.Context, s *discordgo.Session, guildID, cha
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
+	p.persistGuildState()
+
 	return nil
 }
 
@@ -260,6 +262,8 @@ func (p *Player) safeDisconnect(ctx context.Context, vc *discordgo.VoiceConnecti
 }
 
 func (p *Player) Disconnect(ctx context.Context) {
+	p.PersistQueue()
+
 	p.mu.Lock()
 	// stop any playback and cancel in-flight operations
 	p.stopPlayLocked()
@@ -328,6 +332,9 @@ func (p *Player) Add(song SongMetadata, immediate bool) *SongMetadata {
 	if song.IsRadioSuggestion {
 		p.RadioQueuedIndex = insertAt
 	}
+
+	p.PersistQueue()
+
 	return replaced
 }
 
@@ -869,6 +876,7 @@ func (p *Player) ToggleLoopSong() bool {
 		p.loopQueue.Store(false)
 	}
 	p.loopSong.Store(!p.loopSong.Load())
+	p.persistGuildState()
 	return p.loopSong.Load()
 }
 
@@ -886,11 +894,13 @@ func (p *Player) ToggleLoopQueue() (bool, error) {
 		p.loopSong.Store(false)
 	}
 	p.loopQueue.Store(!p.loopQueue.Load())
+	p.persistGuildState()
 	return p.loopQueue.Load(), nil
 }
 
 func (p *Player) ToggleShuffle() bool {
 	p.shuffleMode.Store(!p.shuffleMode.Load())
+	p.persistGuildState()
 	return p.shuffleMode.Load()
 }
 
@@ -913,6 +923,7 @@ func (p *Player) SetVolume(vol int) int {
 // ToggleRadioMode toggles radio mode on/off. Returns the new state.
 func (p *Player) ToggleRadioMode() bool {
 	p.radioMode.Store(!p.radioMode.Load())
+	p.persistGuildState()
 	return p.radioMode.Load()
 }
 
@@ -1415,6 +1426,34 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	}
 
 	p.curPlay = nil
+
+	// Record the completed play to history before advancing
+	if p.NowPlaying != nil && p.repo != nil {
+		song := *p.NowPlaying
+		dur := p.NowPlaying.Length
+		if dur <= 0 {
+			dur = int(p.positionSec.Load())
+		}
+		if dur > 0 {
+			entry := &repository.PlayHistoryEntry{
+				GuildID:         p.guildID,
+				UserID:          song.RequestedBy,
+				VideoID:         song.VideoID,
+				Title:           song.Title,
+				Artist:          song.Artist,
+				Thumbnail:       song.Thumbnail,
+				DurationSeconds: dur,
+				PlayedAt:        time.Now().Unix(),
+			}
+			repo := p.repo
+			go func() {
+				if err := repo.RecordPlay(context.Background(), entry); err != nil {
+					slog.Warn("failed to record play history", "guildID", p.guildID, "err", err)
+				}
+			}()
+		}
+	}
+
 	p.positionSec.Store(0)
 
 	var hasNext bool
@@ -1488,6 +1527,8 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	p.status.Store(int32(StatusIdle))
 	p.mu.Unlock()
 
+	p.PersistQueue()
+
 	if err := p.Play(context.Background(), nil, nil); err != nil {
 		slog.Error("failed to play next song after playback end",
 			"guildID", p.guildID,
@@ -1552,4 +1593,136 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 			p.setIdleState()
 		}
 	}
+}
+
+// persistGuildState saves radio/shuffle/loop mode and channel IDs to the database.
+func (p *Player) persistGuildState() {
+	if p.repo == nil {
+		return
+	}
+	p.mu.Lock()
+	state := &repository.GuildState{
+		GuildID:     p.guildID,
+		RadioMode:   p.radioMode.Load(),
+		ShuffleMode: p.shuffleMode.Load(),
+		LoopSong:    p.loopSong.Load(),
+		LoopQueue:   p.loopQueue.Load(),
+		VoiceChanID: p.ConnChannelID,
+		TextChanID:  p.TextChannelID,
+	}
+	repo := p.repo
+	p.mu.Unlock()
+
+	go func() {
+		if err := repo.SaveGuildState(context.Background(), state); err != nil {
+			slog.Debug("failed to persist guild state", "guildID", p.guildID, "err", err)
+		}
+	}()
+}
+
+// PersistQueue saves the current queue to the database for later resumption.
+func (p *Player) PersistQueue() {
+	if p.repo == nil {
+		return
+	}
+	p.mu.Lock()
+	if len(p.SongQueue) == 0 {
+		p.mu.Unlock()
+		return
+	}
+
+	// Save remaining songs (from current position onward)
+	var songs []repository.QueuedSong
+	for i, s := range p.SongQueue {
+		qs := repository.QueuedSong{
+			GuildID:        p.guildID,
+			Position:       i - p.Qpos,
+			VideoID:        s.VideoID,
+			Title:          s.Title,
+			Artist:         s.Artist,
+			Thumbnail:      s.Thumbnail,
+			URL:            s.URL,
+			Source:         int(s.Source),
+			RequestedBy:    s.RequestedBy,
+			Length:         s.Length,
+			Offset:         s.Offset,
+			IsLive:         s.IsLive,
+			PlaylistTitle:  "",
+			PlaylistSource: "",
+		}
+		if s.Playlist != nil {
+			qs.PlaylistTitle = s.Playlist.Title
+			qs.PlaylistSource = s.Playlist.Source
+		}
+		songs = append(songs, qs)
+	}
+	repo := p.repo
+	guildID := p.guildID
+	p.mu.Unlock()
+
+	go func() {
+		if err := repo.SaveGuildQueue(context.Background(), guildID, 0, songs); err != nil {
+			slog.Debug("failed to persist queue", "guildID", guildID, "err", err)
+		}
+	}()
+}
+
+// RestoreState loads radio/shuffle/loop mode from the database.
+func (p *Player) RestoreState() {
+	if p.repo == nil {
+		return
+	}
+	state, err := p.repo.LoadGuildState(context.Background(), p.guildID)
+	if err != nil || state == nil {
+		return
+	}
+	p.radioMode.Store(state.RadioMode)
+	p.shuffleMode.Store(state.ShuffleMode)
+	p.loopSong.Store(state.LoopSong)
+	p.loopQueue.Store(state.LoopQueue)
+	slog.Info("restored guild state",
+		"guildID", p.guildID,
+		"radio", state.RadioMode,
+		"shuffle", state.ShuffleMode,
+		"loopSong", state.LoopSong,
+		"loopQueue", state.LoopQueue,
+	)
+}
+
+// LoadPersistedQueue returns the persisted queue songs from the database.
+func (p *Player) LoadPersistedQueue() ([]SongMetadata, error) {
+	if p.repo == nil {
+		return nil, errors.New("no repo")
+	}
+	songs, _, err := p.repo.LoadGuildQueue(context.Background(), p.guildID)
+	if err != nil {
+		return nil, err
+	}
+	if len(songs) == 0 {
+		return nil, nil
+	}
+
+	var result []SongMetadata
+	for _, s := range songs {
+		sm := SongMetadata{
+			VideoID:     s.VideoID,
+			Title:       s.Title,
+			Artist:      s.Artist,
+			Thumbnail:   s.Thumbnail,
+			URL:         s.URL,
+			Source:      MediaSource(s.Source),
+			RequestedBy: s.RequestedBy,
+			Length:      s.Length,
+			Offset:      s.Offset,
+			IsLive:      s.IsLive,
+		}
+		if s.PlaylistTitle != "" {
+			sm.Playlist = &QueuedPlaylist{
+				Title:  s.PlaylistTitle,
+				Source: s.PlaylistSource,
+			}
+		}
+		result = append(result, sm)
+	}
+	return result, nil
 }

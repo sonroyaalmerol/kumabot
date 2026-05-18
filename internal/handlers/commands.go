@@ -162,7 +162,24 @@ func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, gu
 		},
 		{Name: "replay", Description: "replay the current song"},
 		{Name: "resume", Description: "resume playback"},
+		{Name: "resume-queue", Description: "restore and play the last saved queue"},
 		{Name: "unskip", Description: "go back in the queue by one song"},
+		{
+			Name:        "wrapped",
+			Description: "Your music listening stats, Spotify Wrapped style!",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name:        "me",
+					Description: "View your personal wrapped stats",
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+				},
+				{
+					Name:        "server",
+					Description: "View the server's wrapped stats",
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+				},
+			},
+		},
 	}
 
 	scopeGuild := guildID
@@ -334,8 +351,12 @@ func (h *CommandHandler) handleChatCommand(s *discordgo.Session, i *discordgo.In
 		h.cmdReplay(s, i)
 	case "resume":
 		h.cmdResume(s, i)
+	case "resume-queue":
+		h.cmdResumeQueue(s, i)
 	case "unskip":
 		h.cmdUnskip(s, i)
+	case "wrapped":
+		h.cmdWrapped(s, i)
 	default:
 		slog.Debug("unknown command", "name", data.Name, "guildID", i.GuildID, "userID", userIDOf(i))
 	}
@@ -1201,4 +1222,131 @@ func userIDOf(i *discordgo.InteractionCreate) string {
 		return ""
 	}
 	return i.Member.User.ID
+}
+
+func (h *CommandHandler) cmdWrapped(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	ctx := context.Background()
+	now := time.Now()
+	startOfYear := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC)
+	since := startOfYear.Unix()
+
+	// Default to server stats
+	subCommand := "server"
+	if len(i.ApplicationCommandData().Options) > 0 {
+		subCommand = i.ApplicationCommandData().Options[0].Name
+	}
+
+	h.deferReply(s, i, false)
+
+	guildName := i.GuildID
+	if g, err := s.State.Guild(i.GuildID); err == nil && g != nil {
+		guildName = g.Name
+	}
+
+	switch subCommand {
+	case "me":
+		stats, err := h.repo.GetUserWrappedStats(ctx, i.GuildID, userIDOf(i), since)
+		if err != nil {
+			slog.Error("wrapped: failed to get user stats", "guildID", i.GuildID, "userID", userIDOf(i), "err", err)
+			h.editReply(s, i, "failed to load your stats. Try again later.")
+			return
+		}
+
+		userName := "You"
+		if i.Member != nil && i.Member.User != nil {
+			userName = i.Member.User.GlobalName
+			if userName == "" {
+				userName = i.Member.User.Username
+			}
+		}
+
+		embeds := buildUserWrappedEmbeds(userName, stats)
+		if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Embeds: &embeds,
+		}); err != nil {
+			slog.Warn("wrapped: failed to send user embeds", "guildID", i.GuildID, "err", err)
+		}
+
+	default: // "server"
+		stats, err := h.repo.GetWrappedStats(ctx, i.GuildID, since)
+		if err != nil {
+			slog.Error("wrapped: failed to get server stats", "guildID", i.GuildID, "err", err)
+			h.editReply(s, i, "failed to load server stats. Try again later.")
+			return
+		}
+
+		embeds := buildWrappedEmbeds(guildName, stats)
+		if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Embeds: &embeds,
+		}); err != nil {
+			slog.Warn("wrapped: failed to send server embeds", "guildID", i.GuildID, "err", err)
+		}
+	}
+
+	slog.Info("cmd wrapped", "guildID", i.GuildID, "userID", userIDOf(i), "sub", subCommand)
+}
+
+func (h *CommandHandler) cmdResumeQueue(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	ctx := context.Background()
+	memberID := userIDOf(i)
+
+	chID, ok := userInVoice(s, i.GuildID, memberID)
+	if !ok {
+		h.reply(s, i, "you need to be in a voice channel first! Join one and try again.", true)
+		return
+	}
+
+	h.deferReply(s, i, false)
+
+	// Load persisted state for channel info
+	state, _ := h.repo.LoadGuildState(ctx, i.GuildID)
+	textChanID := i.ChannelID
+	if state != nil && state.TextChanID != "" {
+		textChanID = state.TextChanID
+	}
+
+	// Load persisted queue
+	songs, err := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID).LoadPersistedQueue()
+	if err != nil {
+		slog.Error("resume-queue: failed to load queue", "guildID", i.GuildID, "err", err)
+		h.editReply(s, i, "failed to load saved queue. There may not be one saved yet.")
+		return
+	}
+	if len(songs) == 0 {
+		h.editReply(s, i, "no saved queue found. Play some music first!")
+		return
+	}
+
+	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	if player == nil {
+		h.editReply(s, i, "internal player error")
+		return
+	}
+
+	if err := player.Connect(ctx, s, i.GuildID, chID, textChanID); err != nil {
+		slog.Warn("resume-queue: voice connect failed", "guildID", i.GuildID, "err", err)
+		h.editReply(s, i, "couldn't connect to your voice channel. Check my permissions.")
+		return
+	}
+
+	// Restore radio/shuffle/loop state
+	player.RestoreState()
+
+	// Add songs to queue
+	count := 0
+	for _, song := range songs {
+		player.Add(song, false)
+		count++
+	}
+
+	// Start playing from the beginning
+	if err := player.Play(ctx, s, nil); err != nil {
+		slog.Error("resume-queue: failed to start playback", "guildID", i.GuildID, "err", err)
+		h.editReply(s, i, fmt.Sprintf("restored %d songs but couldn't start playback. Use `/play` to retry.", count))
+		return
+	}
+
+	msg := fmt.Sprintf("restored **%d** songs from your last session! :rewind:", count)
+	slog.Info("cmd resume-queue", "guildID", i.GuildID, "userID", memberID, "count", count)
+	h.editReply(s, i, msg)
 }
