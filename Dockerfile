@@ -37,8 +37,9 @@ FROM debian:sid-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
+  curl \
+  unzip \
   tzdata \
-  bun \
   libavcodec62 \
   libavformat62 \
   libavutil60 \
@@ -47,6 +48,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libavfilter11 \
   libavdevice62 \
   libopus0 \
+  && curl -fsSL https://bun.com/install | bash \
+  && mv /root/.bun/bin/bun /usr/local/bin/bun \
+  && rm -rf /root/.bun \
+  && apt-get purge -y curl unzip \
+  && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user
