@@ -24,7 +24,7 @@ type Bot struct {
 
 func NewBot(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache) *Bot {
 	pm := player.NewPlayerManager()
-	cmd := NewCommandHandler(cfg, repo, cache, pm, repository.NewFavoritesService(repo))
+	cmd := NewCommandHandler(cfg, repo, cache, pm)
 	comp := NewComponentHandler(cfg, repo, cache, pm)
 	return &Bot{
 		cfg: cfg, repo: repo, cache: cache, pm: pm, cmd: cmd, comp: comp,
@@ -117,7 +117,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		slog.Debug("voice state update", "guildID", gid, "channelID", chID, "nonBotCount", size)
 		if size == 0 {
 			slog.Info("leaving voice channel: no listeners", "guildID", gid, "channelID", chID)
-			player.Disconnect()
+			player.Disconnect(context.Background())
 		}
 	})
 

@@ -149,8 +149,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/ulikunitz/xz v0.5.15 h1:9DNdB5s+SgV3bQ2ApL10xRc35ck0DuIX/isZvIk+ubY=
 github.com/ulikunitz/xz v0.5.15/go.mod h1:nbz6k7qbPmH4IRqmfOplQw/tblSgqTqBwxkY0oWt/14=
-github.com/yeongaori/discordgo v0.0.0-20260307092356-fd09989565b3 h1:yXb9QBEiaQjzU0AXQcgTseWSG4vTWsUnmeoHuq1S0UQ=
-github.com/yeongaori/discordgo v0.0.0-20260307092356-fd09989565b3/go.mod h1:ouzKz7Yuw5RyzMK9WbSH53d5pzjLcjQ58u7hUM/egPI=
+github.com/yeongaori/discordgo-fork v0.0.0-20260326072433-16ef34198ced h1:XDu5+h//S3+f4fMVS9xDYKFu344ZNK1aHezLMlR4ZNI=
+github.com/yeongaori/discordgo-fork v0.0.0-20260326072433-16ef34198ced/go.mod h1:A0FcMFJKJ9fRjgSuZ2o+pIQ6mPS81SVuiLN2vYTa7Ao=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=

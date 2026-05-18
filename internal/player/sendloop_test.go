@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,12 +30,17 @@ func (f *fakePCMStreamer) Close() {
 	_ = f.pw.Close()
 }
 
-func TestSendLoopExitsOnCancel(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
-	vc := &discordgo.VoiceConnection{
+func testVoiceConn() *discordgo.VoiceConnection {
+	return &discordgo.VoiceConnection{
+		Cond:     sync.NewCond(&sync.Mutex{}),
 		OpusSend: make(chan []byte, 64),
 		OpusRecv: make(chan *discordgo.Packet, 2),
 	}
+}
+
+func TestSendLoopExitsOnCancel(t *testing.T) {
+	p := NewPlayer(nil, nil, nil, "test-guild")
+	vc := testVoiceConn()
 
 	pcm := newFakePCMStreamer()
 	enc, err := stream.NewEncoder()
@@ -72,10 +78,7 @@ func TestSendLoopExitsOnCancel(t *testing.T) {
 
 func TestSendLoopExitsWhenProducerBlocked(t *testing.T) {
 	p := NewPlayer(nil, nil, nil, "test-guild")
-	vc := &discordgo.VoiceConnection{
-		OpusSend: make(chan []byte, 64),
-		OpusRecv: make(chan *discordgo.Packet, 2),
-	}
+	vc := testVoiceConn()
 
 	pcm := newFakePCMStreamer()
 	enc, err := stream.NewEncoder()
@@ -113,10 +116,7 @@ func TestSendLoopExitsWhenProducerBlocked(t *testing.T) {
 
 func TestSendLoopNoGoroutineLeak(t *testing.T) {
 	p := NewPlayer(nil, nil, nil, "test-guild")
-	vc := &discordgo.VoiceConnection{
-		OpusSend: make(chan []byte, 64),
-		OpusRecv: make(chan *discordgo.Packet, 2),
-	}
+	vc := testVoiceConn()
 
 	// Let things settle
 	time.Sleep(100 * time.Millisecond)

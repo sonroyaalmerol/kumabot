@@ -115,10 +115,6 @@ func (p *Player) SetSearching(s bool) {
 	}
 }
 
-// MuLock/MuUnlock expose the mutex for component handlers that need atomic state reads.
-func (p *Player) MuLock()   { p.mu.Lock() }
-func (p *Player) MuUnlock() { p.mu.Unlock() }
-
 // StatusPub returns the current player status.
 func (p *Player) StatusPub() PlayerStatus {
 	p.mu.Lock()
@@ -160,9 +156,10 @@ func (p *Player) setIdleState() {
 	p.NowPlaying = nil
 	p.PositionSec = 0
 	queueEmpty := len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
+	channelID := p.ConnChannelID
 	p.mu.Unlock()
 
-	p.clearVoiceChannelStatus()
+	p.clearVoiceChannelStatusWithChannel(channelID)
 
 	if queueEmpty {
 		slog.Info("player idle with empty queue - scheduling disconnect",
@@ -186,7 +183,7 @@ func (p *Player) invalidateURLCacheLocked() {
 	p.urlResolvedAt = time.Time{}
 }
 
-func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID string) error {
+func (p *Player) Connect(ctx context.Context, s *discordgo.Session, guildID, channelID, textChannelID string) error {
 	p.mu.Lock()
 	// already on the same channel
 	if p.Conn != nil && p.ConnChannelID == channelID {
@@ -201,10 +198,10 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID
 
 	if old != nil {
 		_ = old.Speaking(false)
-		_ = old.Disconnect()
+		_ = old.Disconnect(ctx)
 	}
 
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
+	vc, err := s.ChannelVoiceJoin(ctx, guildID, channelID, false, true)
 	if err != nil {
 		return err
 	}
@@ -218,7 +215,6 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID
 	}
 
 	// Load settings for default volume outside lock
-	ctx := context.Background()
 	defVol := DefaultVolume
 	if sset, err := p.repo.GetSettings(ctx, p.guildID); err == nil && sset != nil {
 		defVol = sset.DefaultVolume
@@ -239,7 +235,7 @@ func (p *Player) Connect(s *discordgo.Session, guildID, channelID, textChannelID
 }
 
 // safeDisconnect safely disconnects a voice connection with proper cleanup
-func (p *Player) safeDisconnect(vc *discordgo.VoiceConnection) error {
+func (p *Player) safeDisconnect(ctx context.Context, vc *discordgo.VoiceConnection) error {
 	if vc == nil {
 		return nil
 	}
@@ -268,10 +264,10 @@ func (p *Player) safeDisconnect(vc *discordgo.VoiceConnection) error {
 	// Small delay to let pending operations complete
 	time.Sleep(150 * time.Millisecond)
 
-	return vc.Disconnect()
+	return vc.Disconnect(ctx)
 }
 
-func (p *Player) Disconnect() {
+func (p *Player) Disconnect(ctx context.Context) {
 	p.mu.Lock()
 	// stop any playback and cancel in-flight operations
 	p.stopPlayLocked()
@@ -298,7 +294,7 @@ func (p *Player) Disconnect() {
 
 	if vc != nil {
 		p.clearVoiceChannelStatusWithChannel(connChannelID)
-		_ = p.safeDisconnect(vc)
+		_ = p.safeDisconnect(ctx, vc)
 	}
 
 	if p.onRemove != nil {
@@ -726,14 +722,6 @@ func (p *Player) UpdateVoiceChannelStatus() {
 	}
 }
 
-// clearVoiceChannelStatus removes the voice channel status text.
-func (p *Player) clearVoiceChannelStatus() {
-	p.mu.Lock()
-	channelID := p.ConnChannelID
-	p.mu.Unlock()
-	p.clearVoiceChannelStatusWithChannel(channelID)
-}
-
 func (p *Player) clearVoiceChannelStatusWithChannel(channelID string) {
 	p.mu.Lock()
 	s := p.Session
@@ -787,9 +775,10 @@ func (p *Player) Stop() {
 	if p.Conn != nil {
 		_ = p.Conn.Speaking(false)
 	}
+	channelID := p.ConnChannelID
 	p.mu.Unlock()
 
-	p.clearVoiceChannelStatus()
+	p.clearVoiceChannelStatusWithChannel(channelID)
 
 	slog.Info("player stopped - scheduling disconnect", "guildID", p.guildID)
 	p.scheduleIdleDisconnect()
@@ -890,17 +879,6 @@ func (p *Player) GetPosition() int {
 	return p.PositionSec
 }
 
-func (p *Player) Queue() []SongMetadata {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.Qpos+1 >= len(p.SongQueue) {
-		return nil
-	}
-	cp := make([]SongMetadata, len(p.SongQueue[p.Qpos+1:]))
-	copy(cp, p.SongQueue[p.Qpos+1:])
-	return cp
-}
-
 func (p *Player) ToggleLoopSong() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -946,13 +924,6 @@ func (p *Player) ShuffleOn() bool {
 	return p.ShuffleMode
 }
 
-func (p *Player) ShuffleOff() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.ShuffleMode = false
-	return p.ShuffleMode
-}
-
 func (p *Player) SetVolume(vol int) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -964,12 +935,6 @@ func (p *Player) SetVolume(vol int) int {
 	}
 	p.Volume = vol
 	return vol
-}
-
-func (p *Player) GetVolume() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.Volume
 }
 
 // ToggleRadioMode toggles radio mode on/off. Returns the new state.
@@ -1173,7 +1138,7 @@ func (p *Player) scheduleIdleDisconnect() {
 		if shouldDisconnect {
 			p.Conn = nil
 			p.ConnChannelID = ""
-			_ = p.safeDisconnect(vc)
+			_ = p.safeDisconnect(context.Background(), vc)
 			if p.onRemove != nil {
 				p.onRemove()
 			}
@@ -1199,21 +1164,6 @@ func applyVolumeS16LE(pcm []byte, vol int) {
 	}
 }
 
-func isVoiceReady(vc *discordgo.VoiceConnection) bool {
-	if vc == nil {
-		return false
-	}
-	// Ensure channels are initialized
-	if vc.OpusSend == nil {
-		vc.OpusSend = make(chan []byte, 64)
-	}
-	if vc.OpusRecv == nil {
-		vc.OpusRecv = make(chan *discordgo.Packet, 2)
-	}
-	// Check if connection is ready
-	return vc.OpusSend != nil
-}
-
 func (p *Player) sendLoop(
 	vc *discordgo.VoiceConnection,
 	i *discordgo.InteractionCreate,
@@ -1234,19 +1184,31 @@ func (p *Player) sendLoop(
 
 	// Wait for voice ready
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !isVoiceReady(vc) {
+	for time.Now().Before(deadline) {
+		if vc == nil {
+			return
+		}
+		if vc.OpusSend == nil {
+			vc.OpusSend = make(chan []byte, 64)
+		}
+		if vc.OpusRecv == nil {
+			vc.OpusRecv = make(chan *discordgo.Packet, 2)
+		}
+		if vc.OpusSend != nil {
+			break
+		}
 		select {
 		case <-sess.ctx.Done():
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	if !isVoiceReady(vc) {
+	if vc == nil || vc.OpusSend == nil {
 		return
 	}
 
 	_ = vc.Speaking(true)
-	defer vc.Speaking(false)
+	defer func() { _ = vc.Speaking(false) }()
 
 	// Start producer goroutine
 	sess.producerWg.Add(1)
@@ -1445,7 +1407,7 @@ func (p *Player) consumePackets(
 			// to ensure Discord knows we are speaking even if discordgo reconnected
 			// and silently lost its VoiceServer speaking state.
 			if packetCount%500 == 0 {
-				go vc.Speaking(true)
+				go func() { _ = vc.Speaking(true) }()
 			}
 		case <-dropTimer.C:
 			sess.buf.Release(pkt.data)

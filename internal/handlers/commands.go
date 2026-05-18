@@ -22,11 +22,10 @@ type CommandHandler struct {
 	repo  *repository.Repo
 	cache *cache.FileCache
 	pm    *plib.PlayerManager
-	favs  *repository.FavoritesService
 }
 
-func NewCommandHandler(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, pm *plib.PlayerManager, favs *repository.FavoritesService) *CommandHandler {
-	return &CommandHandler{cfg: cfg, repo: repo, cache: cache, pm: pm, favs: favs}
+func NewCommandHandler(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, pm *plib.PlayerManager) *CommandHandler {
+	return &CommandHandler{cfg: cfg, repo: repo, cache: cache, pm: pm}
 }
 
 func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, guildID string) error {
@@ -167,9 +166,6 @@ func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, gu
 	}
 
 	scopeGuild := guildID
-	if scopeGuild == "" {
-		// register globally
-	}
 
 	for _, c := range cmds {
 		if _, err := s.ApplicationCommandCreate(appID, scopeGuild, c); err != nil {
@@ -270,7 +266,7 @@ func (h *CommandHandler) handleFavoritesAutocomplete(s *discordgo.Session, i *di
 	if !focused {
 		return
 	}
-	items, _ := h.favs.List(context.Background(), i.GuildID)
+	items, _ := h.repo.ListFavorites(context.Background(), i.GuildID)
 	var choices []*discordgo.ApplicationCommandOptionChoice
 	for _, f := range items {
 		if query == "" || strings.Contains(strings.ToLower(f.Name), strings.ToLower(query)) {
@@ -489,7 +485,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 		return
 	}
 
-	if err := player.Connect(s, guildID, chID, textID); err != nil {
+	if err := player.Connect(ctx, s, guildID, chID, textID); err != nil {
 		slog.Warn("voice connect failed", "guildID", guildID, "channelID", chID, "err", err)
 		h.editReply(s, i, "couldn't connect to your voice channel. Check my permissions.")
 		return
@@ -615,7 +611,7 @@ func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.Intera
 		slog.Debug("disconnect command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
 		return
 	}
-	player.Disconnect()
+	player.Disconnect(context.Background())
 	slog.Info("cmd disconnect", "guildID", i.GuildID, "userID", userIDOf(i))
 	h.reply(s, i, "disconnected from voice.", false)
 }
@@ -720,7 +716,9 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 				query = o.StringValue()
 			}
 		}
-		if err := h.favs.Create(ctx, i.GuildID, i.Member.User.ID, name, query); err != nil {
+		if err := h.repo.AddFavorite(ctx, &repository.Favorite{
+			GuildID: i.GuildID, Author: i.Member.User.ID, Name: strings.TrimSpace(name), Query: strings.TrimSpace(query),
+		}); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				h.reply(s, i, "a favorite with that name already exists", true)
 				return
@@ -738,7 +736,7 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 				name = o.StringValue()
 			}
 		}
-		f, err := h.favs.Use(ctx, i.GuildID, name)
+		f, err := h.repo.FindFavorite(ctx, i.GuildID, strings.TrimSpace(name))
 		if err != nil {
 			h.reply(s, i, "no favorite with that name exists", true)
 			return
@@ -748,7 +746,7 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 			h.reply(s, i, "you can only remove your own favorites", true)
 			return
 		}
-		if _, err := h.favs.Remove(ctx, i.GuildID, name); err != nil {
+		if _, err := h.repo.RemoveFavorite(ctx, i.GuildID, strings.TrimSpace(name)); err != nil {
 			slog.Warn("favorite remove failed", "guildID", i.GuildID, "userID", userIDOf(i), "name", name, "err", err)
 			h.reply(s, i, "failed to remove favorite", true)
 			return
@@ -756,7 +754,7 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 		slog.Info("favorite removed", "guildID", i.GuildID, "userID", userIDOf(i), "name", name)
 		h.reply(s, i, "👍 favorite removed", false)
 	case "list":
-		items, err := h.favs.List(ctx, i.GuildID)
+		items, err := h.repo.ListFavorites(ctx, i.GuildID)
 		if err != nil {
 			slog.Warn("favorite list failed", "guildID", i.GuildID, "err", err)
 		}
@@ -787,7 +785,7 @@ func (h *CommandHandler) cmdFavorites(s *discordgo.Session, i *discordgo.Interac
 				skip = o.BoolValue()
 			}
 		}
-		f, err := h.favs.Use(ctx, i.GuildID, name)
+		f, err := h.repo.FindFavorite(ctx, i.GuildID, strings.TrimSpace(name))
 		if err != nil {
 			h.reply(s, i, "no favorite with that name exists", true)
 			return
@@ -1072,10 +1070,7 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 		if o.Name == "page" {
 			page = int(o.IntValue())
 		} else if o.Name == "page-size" {
-			pageSize = max(int(o.IntValue()), 1)
-			if pageSize > 30 {
-				pageSize = 30
-			}
+			pageSize = min(max(int(o.IntValue()), 1), 30)
 		}
 	}
 	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
