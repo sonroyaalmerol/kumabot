@@ -37,12 +37,12 @@ func BuildPlayingEmbed(p *Player) *discordgo.MessageEmbed {
 	}
 
 	p.mu.Lock()
-	pos := p.PositionSec
-	status := p.Status
-	loopSong := p.LoopSong
-	loopQueue := p.LoopQueue
-	shuffle := p.ShuffleMode
-	radio := p.RadioMode
+	pos := p.GetPosition()
+	status := p.StatusPub()
+	loopSong := p.LoopSongPub()
+	loopQueue := p.LoopQueuePub()
+	shuffle := p.ShuffleModePub()
+	radio := p.IsRadioMode()
 	searching := p.IsSearching()
 	queue := p.SongQueue
 	qpos := p.Qpos
@@ -235,7 +235,7 @@ func BuildQueueEmbed(
 		)
 	}
 	loop := ""
-	if p.LoopSong {
+	if p.LoopSongPub() {
 		loop = " (loop on)"
 	}
 	desc += fmt.Sprintf("%s `[ %s ]`\n\n", bar, elapsed)

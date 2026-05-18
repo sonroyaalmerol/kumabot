@@ -48,31 +48,31 @@ type Player struct {
 	ConnChannelID string
 	TextChannelID string
 
-	Status          PlayerStatus
+	status          atomic.Int32 // PlayerStatus (int32 cast)
 	SongQueue       []SongMetadata
 	Qpos            int
 	NowPlaying      *SongMetadata
-	PositionSec     int
+	positionSec     atomic.Int32
 	DefaultVol      int
-	Volume          int // current playback volume 0-150
-	LoopSong        bool
-	LoopQueue       bool
-	ShuffleMode     bool
+	volume          atomic.Int32 // current playback volume 0-150
+	loopSong        atomic.Bool
+	loopQueue       atomic.Bool
+	shuffleMode     atomic.Bool
 	DisconnectTimer *time.Timer
 	LastURL         string
 
 	// Radio feature state
-	RadioMode        bool                // Whether radio is enabled
+	radioMode        atomic.Bool         // Whether radio is enabled
 	RadioQueuedIndex int                 // Position of radio-suggested song in queue, -1 if none
 	RadioHistory     []radioHistoryEntry // History of songs played by radio to avoid repeats
 	radioSearchDone  chan struct{}       // closed when background radio search completes
 
-	requestedSeek      *int
-	lastResolvedURL    string
-	lastVideoID        string
-	urlResolvedAt      time.Time
-	ongoingSearchQueue atomic.Int32
-	lastEmbedMessage   *discordgo.Message
+	requestedSeek    *int
+	lastResolvedURL  string
+	lastVideoID      string
+	urlResolvedAt    time.Time
+	searchQueue      atomic.Int32
+	lastEmbedMessage *discordgo.Message
 
 	curPlay *playSession
 }
@@ -90,36 +90,35 @@ type playSession struct {
 }
 
 func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, guildID string) *Player {
-	return &Player{
+	p := &Player{
 		cfg:              cfg,
 		repo:             repo,
 		cache:            cache,
 		guildID:          guildID,
-		Status:           StatusIdle,
 		DefaultVol:       DefaultVolume,
-		Volume:           DefaultVolume,
 		RadioQueuedIndex: -1,
 		RadioHistory:     make([]radioHistoryEntry, 0),
 	}
+	p.status.Store(int32(StatusIdle))
+	p.volume.Store(int32(DefaultVolume))
+	return p
 }
 
-func (p *Player) IsSearching() bool {
-	return p.ongoingSearchQueue.Load() > 0
-}
+func (p *Player) StatusPub() PlayerStatus { return PlayerStatus(p.status.Load()) }
+func (p *Player) GetPosition() int        { return int(p.positionSec.Load()) }
+func (p *Player) GetVolume() int          { return int(p.volume.Load()) }
+func (p *Player) LoopSongPub() bool       { return p.loopSong.Load() }
+func (p *Player) LoopQueuePub() bool      { return p.loopQueue.Load() }
+func (p *Player) ShuffleModePub() bool    { return p.shuffleMode.Load() }
+func (p *Player) IsRadioMode() bool       { return p.radioMode.Load() }
 
+func (p *Player) IsSearching() bool { return p.searchQueue.Load() > 0 }
 func (p *Player) SetSearching(s bool) {
 	if s {
-		p.ongoingSearchQueue.Add(1)
+		p.searchQueue.Add(1)
 	} else {
-		p.ongoingSearchQueue.Add(-1)
+		p.searchQueue.Add(-1)
 	}
-}
-
-// StatusPub returns the current player status.
-func (p *Player) StatusPub() PlayerStatus {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.Status
 }
 
 // ConnPub returns whether the player has an active voice connection.
@@ -127,13 +126,6 @@ func (p *Player) ConnPub() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.Conn != nil
-}
-
-// LoopSongPub returns the loop song state.
-func (p *Player) LoopSongPub() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.LoopSong
 }
 
 // newOpCtx cancels any previous in-flight operation and creates a fresh context.
@@ -159,9 +151,9 @@ func (p *Player) cancelOpsLocked() {
 
 func (p *Player) setIdleState() {
 	p.mu.Lock()
-	p.Status = StatusIdle
+	p.status.Store(int32(StatusIdle))
 	p.NowPlaying = nil
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 	queueEmpty := len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
 	channelID := p.ConnChannelID
 	p.mu.Unlock()
@@ -176,9 +168,9 @@ func (p *Player) setIdleState() {
 }
 
 func (p *Player) setIdleStateLocked() bool {
-	p.Status = StatusIdle
+	p.status.Store(int32(StatusIdle))
 	p.NowPlaying = nil
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 	p.RadioQueuedIndex = -1
 	p.radioSearchDone = nil
 	return len(p.SongQueue) == 0 || p.Qpos >= len(p.SongQueue)
@@ -233,7 +225,7 @@ func (p *Player) Connect(ctx context.Context, s *discordgo.Session, guildID, cha
 	p.TextChannelID = textChannelID
 	p.ConnChannelID = channelID
 	p.DefaultVol = defVol
-	p.Volume = defVol
+	p.volume.Store(int32(defVol))
 	// any pending idle disconnect for previous state should be canceled
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
@@ -280,9 +272,9 @@ func (p *Player) Disconnect(ctx context.Context) {
 	p.stopPlayLocked()
 	p.cancelOpsLocked()
 
-	p.Status = StatusIdle
+	p.status.Store(int32(StatusIdle))
 	p.NowPlaying = nil
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 	p.RadioQueuedIndex = -1
 	p.radioSearchDone = nil
 
@@ -416,7 +408,7 @@ func (p *Player) QueueSize() int {
 
 func (p *Player) MaybeAutoplayAfterAdd(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p.mu.Lock()
-	shouldPlay := p.Status != StatusPlaying && p.currentLocked() != nil
+	shouldPlay := p.StatusPub() != StatusPlaying && p.currentLocked() != nil
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
 
@@ -571,10 +563,10 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 		return errors.New("play aborted due to state change")
 	}
 	p.curPlay = sess
-	p.Status = StatusPlaying
+	p.status.Store(int32(StatusPlaying))
 	p.NowPlaying = cur
 	p.LastURL = cur.URL
-	p.PositionSec = pos
+	p.positionSec.Store(int32(pos))
 	// If the song we're about to play was the radio suggestion, consume it
 	if p.RadioQueuedIndex == p.Qpos {
 		p.RadioQueuedIndex = -1
@@ -678,17 +670,13 @@ func (p *Player) startEmbedUpdater(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-embedTicker.C:
-			p.mu.Lock()
-			playing := p.Status == StatusPlaying || p.Status == StatusPaused
-			p.mu.Unlock()
+			playing := p.StatusPub() == StatusPlaying || p.StatusPub() == StatusPaused
 			if !playing {
 				return
 			}
 			p.SendNowPlayingEmbed()
 		case <-statusTicker.C:
-			p.mu.Lock()
-			playing := p.Status == StatusPlaying
-			p.mu.Unlock()
+			playing := p.StatusPub() == StatusPlaying
 			if !playing {
 				return
 			}
@@ -704,8 +692,8 @@ func (p *Player) UpdateVoiceChannelStatus() {
 	s := p.Session
 	channelID := p.ConnChannelID
 	cur := p.NowPlaying
-	pos := p.PositionSec
-	status := p.Status
+	pos := p.GetPosition()
+	status := p.StatusPub()
 	p.mu.Unlock()
 
 	if s == nil || channelID == "" || cur == nil || status != StatusPlaying {
@@ -747,10 +735,10 @@ func (p *Player) clearVoiceChannelStatusWithChannel(channelID string) {
 func (p *Player) Pause() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.Status != StatusPlaying {
+	if p.StatusPub() != StatusPlaying {
 		return errors.New("not playing")
 	}
-	p.Status = StatusPaused
+	p.status.Store(int32(StatusPaused))
 	p.stopPlayLocked()
 	if p.Conn != nil {
 		_ = p.Conn.Speaking(false)
@@ -763,11 +751,11 @@ func (p *Player) Stop() {
 	p.stopPlayLocked()
 	p.cancelOpsLocked()
 
-	p.Status = StatusIdle
+	p.status.Store(int32(StatusIdle))
 	p.SongQueue = nil
 	p.Qpos = 0
 	p.NowPlaying = nil
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 	p.RadioQueuedIndex = -1
 	p.radioSearchDone = nil
 
@@ -797,7 +785,7 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 
 	if p.Qpos+n >= len(p.SongQueue) {
 		// Queue empty after skip — if radio is on, search for a related song
-		if p.RadioMode && p.NowPlaying != nil {
+		if p.IsRadioMode() && p.NowPlaying != nil {
 			p.Qpos = len(p.SongQueue)
 			p.cancelIdleDisconnectLocked()
 			p.invalidateURLCacheLocked()
@@ -826,7 +814,7 @@ func (p *Player) Forward(ctx context.Context, s *discordgo.Session, i *discordgo
 	}
 
 	p.Qpos += n
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 
 	p.invalidateURLCacheLocked()
 
@@ -845,7 +833,7 @@ func (p *Player) Back(ctx context.Context, s *discordgo.Session, i *discordgo.In
 		return errors.New("no previous")
 	}
 	p.Qpos--
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 
 	p.invalidateURLCacheLocked()
 
@@ -872,7 +860,7 @@ func (p *Player) Seek(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	}
 	// Set desired seek for next Play
 	p.requestedSeek = &posSec
-	p.Status = StatusPaused
+	p.status.Store(int32(StatusPaused))
 	p.stopPlayLocked()
 	p.cancelIdleDisconnectLocked()
 	p.mu.Unlock()
@@ -880,83 +868,59 @@ func (p *Player) Seek(ctx context.Context, s *discordgo.Session, i *discordgo.In
 	return p.Play(ctx, s, i)
 }
 
-func (p *Player) GetPosition() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.PositionSec
-}
-
 func (p *Player) ToggleLoopSong() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.Status == StatusIdle {
-		return p.LoopSong
+	if p.StatusPub() == StatusIdle {
+		return p.LoopSongPub()
 	}
-	// Turning on loopSong should disable loopQueue
-	if p.LoopQueue {
-		p.LoopQueue = false
+	if p.loopQueue.Load() {
+		p.loopQueue.Store(false)
 	}
-	p.LoopSong = !p.LoopSong
-	return p.LoopSong
+	p.loopSong.Store(!p.loopSong.Load())
+	return p.loopSong.Load()
 }
 
 func (p *Player) ToggleLoopQueue() (bool, error) {
+	if p.StatusPub() == StatusIdle {
+		return p.LoopQueuePub(), errors.New("no songs to loop")
+	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.Status == StatusIdle {
-		return p.LoopQueue, errors.New("no songs to loop")
+	songCount := len(p.SongQueue)
+	p.mu.Unlock()
+	if songCount < 2 {
+		return p.LoopQueuePub(), errors.New("not enough songs to loop a queue")
 	}
-	if len(p.SongQueue) < 2 {
-		return p.LoopQueue, errors.New("not enough songs to loop a queue")
+	if p.loopSong.Load() {
+		p.loopSong.Store(false)
 	}
-	// Turning on loopQueue should disable loopSong
-	if p.LoopSong {
-		p.LoopSong = false
-	}
-	p.LoopQueue = !p.LoopQueue
-	return p.LoopQueue, nil
+	p.loopQueue.Store(!p.loopQueue.Load())
+	return p.loopQueue.Load(), nil
 }
 
 func (p *Player) ToggleShuffle() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.ShuffleMode = !p.ShuffleMode
-	return p.ShuffleMode
+	p.shuffleMode.Store(!p.shuffleMode.Load())
+	return p.shuffleMode.Load()
 }
 
 func (p *Player) ShuffleOn() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.ShuffleMode = true
-	return p.ShuffleMode
+	p.shuffleMode.Store(true)
+	return true
 }
 
 func (p *Player) SetVolume(vol int) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if vol < 0 {
 		vol = 0
 	}
 	if vol > 150 {
 		vol = 150
 	}
-	p.Volume = vol
+	p.volume.Store(int32(vol))
 	return vol
 }
 
 // ToggleRadioMode toggles radio mode on/off. Returns the new state.
 func (p *Player) ToggleRadioMode() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.RadioMode = !p.RadioMode
-	return p.RadioMode
-}
-
-// IsRadioMode returns the current radio mode state.
-func (p *Player) IsRadioMode() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.RadioMode
+	p.radioMode.Store(!p.radioMode.Load())
+	return p.radioMode.Load()
 }
 
 // TryStartRadio attempts to start radio playback if conditions are met.
@@ -978,7 +942,7 @@ func (p *Player) maybeQueueRadio() {
 // playNow starts playback immediately after queueing (used when queue is empty).
 func (p *Player) startRadioSearch(checkQueueEnd, playNow bool) {
 	p.mu.Lock()
-	should := p.RadioMode &&
+	should := p.IsRadioMode() &&
 		p.NowPlaying != nil &&
 		p.Qpos >= 0 &&
 		(!checkQueueEnd || p.Qpos >= len(p.SongQueue)-1) &&
@@ -1077,7 +1041,7 @@ func (p *Player) Next(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 func (p *Player) Resume(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p.mu.Lock()
-	if p.Status == StatusPlaying {
+	if p.StatusPub() == StatusPlaying {
 		p.mu.Unlock()
 		return errors.New("already playing")
 	}
@@ -1086,7 +1050,7 @@ func (p *Player) Resume(ctx context.Context, s *discordgo.Session, i *discordgo.
 		p.mu.Unlock()
 		return errors.New("nothing to play")
 	}
-	pos := p.PositionSec
+	pos := p.GetPosition()
 	p.requestedSeek = &pos
 	p.stopPlayLocked()
 	p.cancelIdleDisconnectLocked()
@@ -1141,7 +1105,7 @@ func (p *Player) scheduleIdleDisconnect() {
 		}
 
 		vc := p.Conn
-		shouldDisconnect := p.Status == StatusIdle && p.curPlay == nil && vc != nil
+		shouldDisconnect := p.StatusPub() == StatusIdle && p.curPlay == nil && vc != nil
 		if shouldDisconnect {
 			p.Conn = nil
 			p.ConnChannelID = ""
@@ -1281,9 +1245,7 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 		copy(framePCM, f.data)
 
 		// Apply volume scaling (S16LE samples)
-		p.mu.Lock()
-		vol := p.Volume
-		p.mu.Unlock()
+		vol := p.GetVolume()
 		if vol != 100 {
 			applyVolumeS16LE(framePCM, vol)
 		}
@@ -1358,7 +1320,7 @@ func (p *Player) consumePackets(
 		sec := int(pts48 / 48000)
 		p.mu.Lock()
 		if p.curPlay == sess {
-			p.PositionSec = sec
+			p.positionSec.Store(int32(sec))
 		}
 		p.mu.Unlock()
 	}
@@ -1445,15 +1407,15 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	}
 
 	p.curPlay = nil
-	p.PositionSec = 0
+	p.positionSec.Store(0)
 
 	var hasNext bool
 
-	if p.LoopSong {
+	if p.loopSong.Load() {
 		seek0 := 0
 		p.requestedSeek = &seek0
 		hasNext = true
-	} else if p.ShuffleMode && len(p.SongQueue) > (p.Qpos+1) {
+	} else if p.shuffleMode.Load() && len(p.SongQueue) > (p.Qpos+1) {
 		remainingCount := len(p.SongQueue) - (p.Qpos + 1)
 		randomIndex := (p.Qpos + 1) + rand.IntN(remainingCount)
 
@@ -1461,7 +1423,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 
 		p.Qpos++
 		hasNext = true
-	} else if p.LoopQueue && len(p.SongQueue) > 0 {
+	} else if p.loopQueue.Load() && len(p.SongQueue) > 0 {
 		p.Qpos = (p.Qpos + 1) % len(p.SongQueue)
 		hasNext = true
 	} else {
@@ -1484,7 +1446,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 
 	// If no next song, wait for any in-flight background radio search before giving up.
 	// This eliminates the gap between songs when radio pre-queued while the last song was playing.
-	if !hasNext && p.RadioMode && p.NowPlaying != nil {
+	if !hasNext && p.IsRadioMode() && p.NowPlaying != nil {
 		ch := p.radioSearchDone
 		p.mu.Unlock()
 		if ch != nil {
@@ -1498,7 +1460,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 	}
 
 	if !hasNext {
-		if p.RadioMode && p.NowPlaying != nil {
+		if p.IsRadioMode() && p.NowPlaying != nil {
 			p.mu.Unlock()
 			p.tryQueueRadioSong(true)
 			return
@@ -1515,7 +1477,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 		return
 	}
 
-	p.Status = StatusIdle
+	p.status.Store(int32(StatusIdle))
 	p.mu.Unlock()
 
 	if err := p.Play(context.Background(), nil, nil); err != nil {
@@ -1530,7 +1492,7 @@ func (p *Player) handlePlaybackEnd(sess *playSession, i *discordgo.InteractionCr
 // If playAfter is true, it also starts playback (used when called from handlePlaybackEnd).
 func (p *Player) tryQueueRadioSong(playAfter bool) {
 	p.mu.Lock()
-	if !p.RadioMode || p.NowPlaying == nil {
+	if !p.IsRadioMode() || p.NowPlaying == nil {
 		p.mu.Unlock()
 		return
 	}
@@ -1561,7 +1523,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	related.RequestedBy = "Radio"
 
 	p.mu.Lock()
-	if !p.RadioMode {
+	if !p.IsRadioMode() {
 		p.mu.Unlock()
 		return
 	}

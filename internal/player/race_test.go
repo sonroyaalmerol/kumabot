@@ -24,25 +24,19 @@ func TestConcurrentStatusRead(t *testing.T) {
 		OpusSend: make(chan []byte, 64),
 		OpusRecv: make(chan *discordgo.Packet, 2),
 	}
-	p.Status = StatusPlaying
+	p.status.Store(int32(StatusPlaying))
 	p.mu.Unlock()
 
 	var stop atomic.Bool
 
-	// Writer goroutine: continuously flips status under lock.
+	// Writer goroutine: continuously flips status via atomic store.
 	go func() {
 		for !stop.Load() {
-			p.mu.Lock()
-			p.Status = StatusPlaying
-			p.mu.Unlock()
+			p.status.Store(int32(StatusPlaying))
 
-			p.mu.Lock()
-			p.Status = StatusPaused
-			p.mu.Unlock()
+			p.status.Store(int32(StatusPaused))
 
-			p.mu.Lock()
-			p.Status = StatusIdle
-			p.mu.Unlock()
+			p.status.Store(int32(StatusIdle))
 		}
 	}()
 
@@ -74,6 +68,11 @@ func TestConcurrentStatusRead(t *testing.T) {
 			_ = p.GetCurrent()
 			_ = p.GetPosition()
 			_ = p.QueueSize()
+			_ = p.GetVolume()
+			_ = p.LoopSongPub()
+			_ = p.LoopQueuePub()
+			_ = p.ShuffleModePub()
+			_ = p.IsRadioMode()
 			reads.Add(1)
 		}
 	}()
@@ -99,7 +98,7 @@ func TestScheduleIdleDisconnectDoesNotHoldLockDuringIO(t *testing.T) {
 	p.mu.Lock()
 	p.Conn = vc
 	p.ConnChannelID = "test-channel"
-	p.Status = StatusIdle
+	p.status.Store(int32(StatusIdle))
 	p.mu.Unlock()
 
 	// Drain OpusSend so Speaking(false) won't block
@@ -120,20 +119,16 @@ func TestScheduleIdleDisconnectDoesNotHoldLockDuringIO(t *testing.T) {
 		p.mu.Lock()
 
 		vc := p.Conn
-		shouldDisconnect := p.Status == StatusIdle && p.curPlay == nil && vc != nil
+		shouldDisconnect := p.StatusPub() == StatusIdle && p.curPlay == nil && vc != nil
 		if shouldDisconnect {
 			p.Conn = nil
 			p.ConnChannelID = ""
 		}
-		onRemove := p.onRemove
 		p.mu.Unlock() // Must release lock BEFORE I/O
 
 		if shouldDisconnect && vc != nil {
 			close(timerFired)
 			_ = p.safeDisconnect(context.Background(), vc)
-			if onRemove != nil {
-				onRemove()
-			}
 		}
 	}()
 
