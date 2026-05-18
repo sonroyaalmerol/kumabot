@@ -38,6 +38,7 @@ FROM debian:sid-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   tzdata \
+  bun \
   libavcodec62 \
   libavformat62 \
   libavutil60 \
@@ -54,7 +55,7 @@ USER kumabot
 
 WORKDIR /app
 ENV DATA_DIR=/app/data
-RUN mkdir -p /app/data /app/data/cache /app/data/cache/tmp
+RUN mkdir -p /app/data
 
 # Copy app binary
 COPY --from=builder /out/kumabot /usr/local/bin/kumabot

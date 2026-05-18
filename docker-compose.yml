@@ -8,18 +8,16 @@ services:
       # Optional Spotify (for Spotify URL/auto-complete features)
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      # Data/cache directories inside container
+      # Data directory inside container
       - DATA_DIR=/app/data
       # Optional bot presence
       - BOT_STATUS=online
       - BOT_ACTIVITY=music
       # Optional: register slash commands on the bot (global) vs guilds
       - REGISTER_COMMANDS_ON_BOT=false
-      # Cache limit (bytes). Example ~2GB
-      - CACHE_LIMIT=2147483648
       # SponsorBlock
-      - ENABLE_SPONSORBLOCK=true
+      - ENABLE_SPONSORBLOCK=false
       - SPONSORBLOCK_TIMEOUT=5
     volumes:
-      # Persist bot data (sqlite db, cache, etc.)
+      # Persist bot data (sqlite db, cookies, etc.)
       - ./data:/app/data
