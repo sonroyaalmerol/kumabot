@@ -1547,6 +1547,7 @@ func (p *Player) tryQueueRadioSong(playAfter bool) {
 	}
 	currentSong := *p.NowPlaying
 	ctx := p.opCtx
+	p.addToRadioHistory(currentSong.VideoID, currentSong.Title, currentSong.Artist)
 	p.mu.Unlock()
 
 	if ctx == nil {

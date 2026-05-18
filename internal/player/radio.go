@@ -499,6 +499,11 @@ func (p *Player) isSuitableRadioChoice(candidate *SongMetadata, current SongMeta
 }
 
 func (p *Player) addToRadioHistory(videoID string, title string, artist string) {
+	for i := range p.RadioHistory {
+		if p.RadioHistory[i].VideoID == videoID {
+			return
+		}
+	}
 	p.RadioHistory = append(p.RadioHistory, radioHistoryEntry{
 		VideoID:        videoID,
 		Title:          title,
