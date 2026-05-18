@@ -169,6 +169,7 @@ func ytdlpDebugf(format string, args ...any) {
 // YtdlpGetInfo runs yt-dlp -J -f bestaudio/best URL.
 func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPInfo, error) {
 	cmd := ytdlp.New().
+		JsRuntimes("bun").
 		Format("ba[acodec^=opus]/ba[ext=m4a]/bestaudio/best").
 		NoCheckCertificates().
 		DumpJSON()
@@ -284,6 +285,7 @@ func YtdlpGetRelated(ctx context.Context, cfg *config.Config, videoID string, li
 	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", videoID, videoID)
 
 	cmd := ytdlp.New().
+		JsRuntimes("bun").
 		FlatPlaylist().
 		DumpJSON().
 		PlaylistItems(fmt.Sprintf(":%d", limit))

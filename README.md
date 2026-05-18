@@ -176,10 +176,12 @@ services:
 ### Manual Build
 
 ```bash
-sudo apt-get install pkg-config libavdevice-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libopus-dev
+sudo apt-get install pkg-config libavdevice-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libopus-dev bun
 export CGO_ENABLED=1
 go build -o kumabot ./cmd/kumabot
 ```
+
+> **Note:** yt-dlp requires a JavaScript runtime (bun, deno, or node) for YouTube extraction. Install one before running the bot.
 
 ## License
 
