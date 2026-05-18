@@ -8,27 +8,25 @@ import (
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	"github.com/sonroyaalmerol/kumabot/internal/player"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
 )
 
 type Bot struct {
-	cfg   *config.Config
-	repo  *repository.Repo
-	cache *cache.FileCache
-	pm    *player.PlayerManager
-	cmd   *CommandHandler
-	comp  *ComponentHandler
+	cfg  *config.Config
+	repo *repository.Repo
+	pm   *player.PlayerManager
+	cmd  *CommandHandler
+	comp *ComponentHandler
 }
 
-func NewBot(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache) *Bot {
+func NewBot(cfg *config.Config, repo *repository.Repo) *Bot {
 	pm := player.NewPlayerManager()
-	cmd := NewCommandHandler(cfg, repo, cache, pm)
-	comp := NewComponentHandler(cfg, repo, cache, pm)
+	cmd := NewCommandHandler(cfg, repo, pm)
+	comp := NewComponentHandler(cfg, repo, pm)
 	return &Bot{
-		cfg: cfg, repo: repo, cache: cache, pm: pm, cmd: cmd, comp: comp,
+		cfg: cfg, repo: repo, pm: pm, cmd: cmd, comp: comp,
 	}
 }
 

@@ -113,40 +113,6 @@ func (r *Repo) ListFavorites(ctx context.Context, guild string) ([]Favorite, err
 	return out, nil
 }
 
-func (r *Repo) CacheTouch(ctx context.Context, hash string, size int64, created bool) error {
-	now := time.Now().Unix()
-	if created {
-		_, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO file_cache(hash,bytes,accessed_at,created_at) VALUES (?,?,?,COALESCE((SELECT created_at FROM file_cache WHERE hash=?),?))`,
-			hash, size, now, hash, now)
-		return err
-	}
-	_, err := r.db.ExecContext(ctx, `UPDATE file_cache SET accessed_at=? WHERE hash=?`, now, hash)
-	return err
-}
-
-func (r *Repo) CacheRemove(ctx context.Context, hash string) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM file_cache WHERE hash=?`, hash)
-	return err
-}
-
-func (r *Repo) CacheTotalBytes(ctx context.Context) (int64, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(bytes),0) FROM file_cache`)
-	var v int64
-	if err := row.Scan(&v); err != nil {
-		return 0, err
-	}
-	return v, nil
-}
-
-func (r *Repo) CacheOldest(ctx context.Context) (string, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT hash FROM file_cache ORDER BY accessed_at ASC LIMIT 1`)
-	var hash string
-	if err := row.Scan(&hash); err != nil {
-		return "", err
-	}
-	return hash, nil
-}
-
 func (r *Repo) RecordPlay(ctx context.Context, e *PlayHistoryEntry) error {
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO play_history(guild_id, user_id, video_id, title, artist, thumbnail, duration_seconds, played_at)
@@ -426,11 +392,6 @@ func (r *Repo) LoadGuildQueue(ctx context.Context, guildID string) ([]QueuedSong
 	// The "qpos" is stored as the position of the first item in the queue.
 	// For simplicity, we always resume from the beginning of saved songs.
 	return songs, 0, nil
-}
-
-func (r *Repo) ClearGuildQueue(ctx context.Context, guildID string) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM guild_queue WHERE guild_id = ?`, guildID)
-	return err
 }
 
 func boolToInt(b bool) int {

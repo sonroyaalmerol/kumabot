@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	plib "github.com/sonroyaalmerol/kumabot/internal/player"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
@@ -26,14 +25,13 @@ const (
 )
 
 type ComponentHandler struct {
-	cfg   *config.Config
-	repo  *repository.Repo
-	cache *cache.FileCache
-	pm    *plib.PlayerManager
+	cfg  *config.Config
+	repo *repository.Repo
+	pm   *plib.PlayerManager
 }
 
-func NewComponentHandler(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, pm *plib.PlayerManager) *ComponentHandler {
-	return &ComponentHandler{cfg: cfg, repo: repo, cache: cache, pm: pm}
+func NewComponentHandler(cfg *config.Config, repo *repository.Repo, pm *plib.PlayerManager) *ComponentHandler {
+	return &ComponentHandler{cfg: cfg, repo: repo, pm: pm}
 }
 
 func (c *ComponentHandler) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {

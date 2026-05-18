@@ -5,8 +5,6 @@ type Config struct {
 	SpotifyClientID        string
 	SpotifyClientSecret    string
 	DataDir                string
-	CacheDir               string
-	CacheLimitBytes        int64
 	BotStatus              string // online/dnd/idle
 	BotActivity            string
 	EnableSponsorBlock     bool

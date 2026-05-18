@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
 	"github.com/sonroyaalmerol/kumabot/internal/stream"
@@ -38,7 +37,7 @@ type Player struct {
 	curPlay          *playSession
 	cfg              *config.Config
 	onRemove         func()
-	cache            *cache.FileCache
+	repo             *repository.Repo
 	opCancel         context.CancelFunc
 	requestedSeek    *int
 	Conn             *discordgo.VoiceConnection
@@ -46,7 +45,6 @@ type Player struct {
 	NowPlaying       *SongMetadata
 	DisconnectTimer  *time.Timer
 	radioSearchDone  chan struct{}
-	repo             *repository.Repo
 	lastEmbedMessage *discordgo.Message
 	LastURL          string
 	guildID          string
@@ -82,11 +80,10 @@ type playSession struct {
 	producerWg sync.WaitGroup
 }
 
-func NewPlayer(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, guildID string) *Player {
+func NewPlayer(cfg *config.Config, repo *repository.Repo, guildID string) *Player {
 	p := &Player{
 		cfg:              cfg,
 		repo:             repo,
-		cache:            cache,
 		guildID:          guildID,
 		DefaultVol:       DefaultVolume,
 		RadioQueuedIndex: -1,

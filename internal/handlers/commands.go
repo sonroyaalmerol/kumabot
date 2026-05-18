@@ -9,7 +9,6 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/sonroyaalmerol/kumabot/internal/autocomplete"
-	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	plib "github.com/sonroyaalmerol/kumabot/internal/player"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
@@ -18,14 +17,13 @@ import (
 )
 
 type CommandHandler struct {
-	cfg   *config.Config
-	repo  *repository.Repo
-	cache *cache.FileCache
-	pm    *plib.PlayerManager
+	cfg  *config.Config
+	repo *repository.Repo
+	pm   *plib.PlayerManager
 }
 
-func NewCommandHandler(cfg *config.Config, repo *repository.Repo, cache *cache.FileCache, pm *plib.PlayerManager) *CommandHandler {
-	return &CommandHandler{cfg: cfg, repo: repo, cache: cache, pm: pm}
+func NewCommandHandler(cfg *config.Config, repo *repository.Repo, pm *plib.PlayerManager) *CommandHandler {
+	return &CommandHandler{cfg: cfg, repo: repo, pm: pm}
 }
 
 func (h *CommandHandler) RegisterCommands(s *discordgo.Session, appID string, guildID string) error {
@@ -499,7 +497,7 @@ func (h *CommandHandler) enqueueAndMaybeStart(
 
 	h.deferReply(s, i, set.QAddEphemeral)
 
-	player := h.pm.Get(h.cfg, h.repo, h.cache, guildID)
+	player := h.pm.Get(h.cfg, h.repo, guildID)
 	if player == nil {
 		slog.Error("player manager returned nil", "guildID", guildID)
 		h.editReply(s, i, "internal player error")
@@ -609,7 +607,7 @@ func (h *CommandHandler) cmdPlay(s *discordgo.Session, i *discordgo.InteractionC
 }
 
 func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil || !player.ConnPub() {
 		h.reply(s, i, "not connected to voice", true)
 		slog.Debug("stop command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -627,7 +625,7 @@ func (h *CommandHandler) cmdStop(s *discordgo.Session, i *discordgo.InteractionC
 }
 
 func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil || !player.ConnPub() {
 		h.reply(s, i, "not connected to voice", true)
 		slog.Debug("disconnect command failed: not connected", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -639,7 +637,7 @@ func (h *CommandHandler) cmdDisconnect(s *discordgo.Session, i *discordgo.Intera
 }
 
 func (h *CommandHandler) cmdClear(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("clear command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -652,7 +650,7 @@ func (h *CommandHandler) cmdClear(s *discordgo.Session, i *discordgo.Interaction
 }
 
 func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.smartReply(s, i, "internal player error", true)
 		return
@@ -682,7 +680,7 @@ func (h *CommandHandler) cmdNowPlaying(s *discordgo.Session, i *discordgo.Intera
 }
 
 func (h *CommandHandler) cmdFseek(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("fseek command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -910,7 +908,7 @@ func (h *CommandHandler) cmdConfig(s *discordgo.Session, i *discordgo.Interactio
 }
 
 func (h *CommandHandler) cmdLoop(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("loop command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -931,7 +929,7 @@ func (h *CommandHandler) cmdLoop(s *discordgo.Session, i *discordgo.InteractionC
 }
 
 func (h *CommandHandler) cmdLoopQueue(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("loop-queue command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -952,7 +950,7 @@ func (h *CommandHandler) cmdLoopQueue(s *discordgo.Session, i *discordgo.Interac
 }
 
 func (h *CommandHandler) cmdShuffle(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("loop-queue command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -968,7 +966,7 @@ func (h *CommandHandler) cmdShuffle(s *discordgo.Session, i *discordgo.Interacti
 }
 
 func (h *CommandHandler) cmdRadio(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("radio command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1001,7 +999,7 @@ func (h *CommandHandler) cmdMove(s *discordgo.Session, i *discordgo.InteractionC
 		slog.Debug("move command failed: invalid positions", "guildID", i.GuildID, "userID", userIDOf(i), "from", from, "to", to)
 		return
 	}
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("move command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1018,7 +1016,7 @@ func (h *CommandHandler) cmdMove(s *discordgo.Session, i *discordgo.InteractionC
 }
 
 func (h *CommandHandler) cmdNext(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("next command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1042,7 +1040,7 @@ func (h *CommandHandler) cmdVolume(s *discordgo.Session, i *discordgo.Interactio
 			level = int(o.IntValue())
 		}
 	}
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use  to start listening!", true)
 		return
@@ -1057,7 +1055,7 @@ func (h *CommandHandler) cmdVolume(s *discordgo.Session, i *discordgo.Interactio
 }
 
 func (h *CommandHandler) cmdPause(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("pause command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1098,7 +1096,7 @@ func (h *CommandHandler) cmdQueue(s *discordgo.Session, i *discordgo.Interaction
 			pageSize = min(max(int(o.IntValue()), 1), 30)
 		}
 	}
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 
 	embed, err := plib.BuildQueueEmbed(player, page, pageSize)
 	if err != nil {
@@ -1135,7 +1133,7 @@ func (h *CommandHandler) cmdRemove(s *discordgo.Session, i *discordgo.Interactio
 		slog.Debug("remove command failed: invalid params", "guildID", i.GuildID, "userID", userIDOf(i), "pos", pos, "cnt", cnt)
 		return
 	}
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("remove command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1151,7 +1149,7 @@ func (h *CommandHandler) cmdRemove(s *discordgo.Session, i *discordgo.Interactio
 }
 
 func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("replay command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1169,7 +1167,7 @@ func (h *CommandHandler) cmdReplay(s *discordgo.Session, i *discordgo.Interactio
 }
 
 func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("resume command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1197,7 +1195,7 @@ func (h *CommandHandler) cmdResume(s *discordgo.Session, i *discordgo.Interactio
 }
 
 func (h *CommandHandler) cmdUnskip(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.reply(s, i, "not in a voice channel. Use `/play` to start listening!", true)
 		slog.Error("unskip command failed: player is nil", "guildID", i.GuildID, "userID", userIDOf(i))
@@ -1309,7 +1307,7 @@ func (h *CommandHandler) cmdResumeQueue(s *discordgo.Session, i *discordgo.Inter
 	}
 
 	// Load persisted queue
-	songs, err := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID).LoadPersistedQueue()
+	songs, err := h.pm.Get(h.cfg, h.repo, i.GuildID).LoadPersistedQueue()
 	if err != nil {
 		slog.Error("resume-queue: failed to load queue", "guildID", i.GuildID, "err", err)
 		h.editReply(s, i, "failed to load saved queue. There may not be one saved yet.")
@@ -1320,7 +1318,7 @@ func (h *CommandHandler) cmdResumeQueue(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	player := h.pm.Get(h.cfg, h.repo, h.cache, i.GuildID)
+	player := h.pm.Get(h.cfg, h.repo, i.GuildID)
 	if player == nil {
 		h.editReply(s, i, "internal player error")
 		return

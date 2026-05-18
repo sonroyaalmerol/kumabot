@@ -22,12 +22,6 @@ type ResolveEvent struct {
 // ProgressFunc is called to update the user on resolution progress.
 type ProgressFunc func(msg string)
 
-func (fn ProgressFunc) update(msg string) {
-	if fn != nil {
-		fn(msg)
-	}
-}
-
 func ResolveQueryStream(
 	ctx context.Context,
 	cfg *config.Config,
@@ -45,19 +39,14 @@ func ResolveQueryStream(
 		// URL/URI branch
 		if strings.HasPrefix(q, "http://") || strings.HasPrefix(q, "https://") || strings.HasPrefix(q, "spotify:") {
 			// Spotify
-			if isSpotify(q) {
+			if typ, id, spErr := spotify.ParseID(q); spErr == nil && (typ == "album" || typ == "playlist" || typ == "track" || typ == "artist") {
 				if cfg.SpotifyClientID == "" || cfg.SpotifyClientSecret == "" {
 					ch <- ResolveEvent{Err: fmt.Errorf("spotify is not enabled")}
 					return
 				}
-				sp, err := spotify.NewClientCredentials(cfg.SpotifyClientID, cfg.SpotifyClientSecret)
-				if err != nil {
-					ch <- ResolveEvent{Err: fmt.Errorf("spotify auth: %w", err)}
-					return
-				}
-				typ, id, err := spotify.ParseID(q)
-				if err != nil {
-					ch <- ResolveEvent{Err: fmt.Errorf("invalid spotify identifier")}
+				sp, spErr2 := spotify.NewClientCredentials(cfg.SpotifyClientID, cfg.SpotifyClientSecret)
+				if spErr2 != nil {
+					ch <- ResolveEvent{Err: fmt.Errorf("spotify auth: %w", spErr2)}
 					return
 				}
 
@@ -110,7 +99,9 @@ func ResolveQueryStream(
 			// YouTube playlist
 			if strings.Contains(q, "youtube.com") || strings.Contains(q, "youtu.be") || strings.Contains(q, "music.youtube.") {
 				if strings.Contains(q, "list=") {
-					progress.update("Loading playlist...")
+					if progress != nil {
+						progress("Loading playlist...")
+					}
 					infos, err := stream.YtdlpPlaylist(ctx, cfg, q)
 					if err != nil || len(infos) == 0 {
 						ch <- ResolveEvent{Err: fmt.Errorf("not found")}
@@ -124,7 +115,9 @@ func ResolveQueryStream(
 					// resolve each entry incrementally
 					for idx, e := range infos {
 						if idx%5 == 0 {
-							progress.update(fmt.Sprintf("Resolving track %d/%d...", idx+1, len(infos)))
+							if progress != nil {
+								progress(fmt.Sprintf("Resolving track %d/%d...", idx+1, len(infos)))
+							}
 						}
 						select {
 						case <-ctx.Done():
@@ -147,7 +140,9 @@ func ResolveQueryStream(
 				}
 
 				// single YouTube item
-				progress.update("Loading stream...")
+				if progress != nil {
+					progress("Loading stream...")
+				}
 				info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, q, stream.DefaultInfoTimeout)
 				if err != nil {
 					ch <- ResolveEvent{Err: err}
@@ -177,7 +172,9 @@ func ResolveQueryStream(
 		}
 
 		// Not a URL => YouTube search
-		progress.update("Searching YouTube...")
+		if progress != nil {
+			progress("Searching YouTube...")
+		}
 		info, err := stream.YtdlpGetInfoWithTimeout(ctx, cfg, "ytsearch1:"+q, stream.DefaultInfoTimeout)
 		if err != nil {
 			ch <- ResolveEvent{Err: err}
@@ -212,7 +209,9 @@ func streamSpotifyTracks(
 		tracks = tracks[:playlistLimit]
 	}
 
-	progress.update(fmt.Sprintf("Resolving %d Spotify tracks...", len(tracks)))
+	if progress != nil {
+		progress(fmt.Sprintf("Resolving %d Spotify tracks...", len(tracks)))
+	}
 	for _, t := range tracks {
 		select {
 		case <-ctx.Done():
@@ -245,10 +244,6 @@ func getSB(cfg *config.Config) *sponsorblock.Applier {
 		}
 	})
 	return sbApplier
-}
-
-func isSpotify(s string) bool {
-	return strings.HasPrefix(s, "spotify:") || strings.Contains(s, "open.spotify.com")
 }
 
 func applySponsorBlockToSong(ctx context.Context, cfg *config.Config, m *SongMetadata) {

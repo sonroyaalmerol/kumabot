@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/sonroyaalmerol/kumabot/internal/utils"
 )
 
 // parseChaptersFromDescription extracts chapter markers (label + timestamp) from the description.
@@ -98,18 +100,7 @@ func parseTS(s string) int {
 	parts := strings.Split(s, ":")
 	total := 0
 	for _, p := range parts {
-		total = total*60 + atoiSafe(strings.TrimSpace(p))
+		total = total*60 + utils.Atoi(strings.TrimSpace(p))
 	}
 	return total
-}
-
-func atoiSafe(s string) int {
-	n := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		}
-	}
-	return n
 }

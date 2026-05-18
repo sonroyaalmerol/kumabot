@@ -39,7 +39,7 @@ func testVoiceConn() *discordgo.VoiceConnection {
 }
 
 func TestSendLoopExitsOnCancel(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 	vc := testVoiceConn()
 
 	pcm := newFakePCMStreamer()
@@ -77,7 +77,7 @@ func TestSendLoopExitsOnCancel(t *testing.T) {
 }
 
 func TestSendLoopExitsWhenProducerBlocked(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 	vc := testVoiceConn()
 
 	pcm := newFakePCMStreamer()
@@ -115,7 +115,7 @@ func TestSendLoopExitsWhenProducerBlocked(t *testing.T) {
 }
 
 func TestSendLoopNoGoroutineLeak(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 	vc := testVoiceConn()
 
 	// Let things settle

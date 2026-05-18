@@ -17,7 +17,7 @@ import (
 // The test verifies that the unprotected reads trigger the race detector,
 // while the public accessor methods (StatusPub, ConnPub) are race-free.
 func TestConcurrentStatusRead(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 	p.mu.Lock()
 	p.Conn = &discordgo.VoiceConnection{
 		Cond:     sync.NewCond(&sync.Mutex{}),
@@ -87,7 +87,7 @@ func TestConcurrentStatusRead(t *testing.T) {
 // The scheduleIdleDisconnect AfterFunc must release the lock before calling
 // safeDisconnect (which does time.Sleep + network calls).
 func TestScheduleIdleDisconnectDoesNotHoldLockDuringIO(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 
 	vc := &discordgo.VoiceConnection{
 		Cond:     sync.NewCond(&sync.Mutex{}),
@@ -153,7 +153,7 @@ func TestScheduleIdleDisconnectDoesNotHoldLockDuringIO(t *testing.T) {
 // TestStopPlayLockedConcurrentStop verifies that two sequential calls to
 // stopPlayLocked (as happens when Stop + Forward overlap) don't deadlock.
 func TestStopPlayLockedConcurrentStop(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 
 	pcm := newFakePCMStreamer()
 	enc, err := stream.NewEncoder()
@@ -205,7 +205,7 @@ func TestStopPlayLockedConcurrentStop(t *testing.T) {
 // TestConcurrentAddAndClear verifies that adding songs and clearing the queue
 // from different goroutines doesn't panic or corrupt state.
 func TestConcurrentAddAndClear(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 
 	var wg sync.WaitGroup
 	const iterations = 100
@@ -286,7 +286,7 @@ func TestProducerConsumerCancelRace(t *testing.T) {
 // TestConcurrentSafeDisconnect verifies that safeDisconnect doesn't panic
 // when called concurrently on the same voice connection.
 func TestConcurrentSafeDisconnect(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 
 	vc := &discordgo.VoiceConnection{
 		Cond:     sync.NewCond(&sync.Mutex{}),

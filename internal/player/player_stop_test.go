@@ -28,7 +28,7 @@ func (b *blockingPCMStreamer) Close() {
 }
 
 func TestStopPlayLockedDoesNotDeadlock(t *testing.T) {
-	p := NewPlayer(nil, nil, nil, "test-guild")
+	p := NewPlayer(nil, nil, "test-guild")
 
 	pcm := newBlockingPCMStreamer()
 	enc, err := stream.NewEncoder()

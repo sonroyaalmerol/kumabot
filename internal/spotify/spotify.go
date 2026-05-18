@@ -36,8 +36,6 @@ func NewClientCredentials(clientID, clientSecret string) (*Client, error) {
 	return &Client{raw: cl}, nil
 }
 
-func (c *Client) Raw() *spotify.Client { return c.raw }
-
 func ParseID(raw string) (typ string, id spotify.ID, err error) {
 	if strings.HasPrefix(raw, "spotify:") {
 		parts := strings.Split(raw, ":")

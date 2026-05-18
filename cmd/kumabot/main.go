@@ -9,7 +9,6 @@ import (
 	"syscall"
 
 	"github.com/lrstanley/go-ytdlp"
-	"github.com/sonroyaalmerol/kumabot/internal/cache"
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 	"github.com/sonroyaalmerol/kumabot/internal/handlers"
 	"github.com/sonroyaalmerol/kumabot/internal/repository"
@@ -26,8 +25,7 @@ func main() {
 		log.Fatal(err)
 	}
 	repo := repository.NewRepo(db)
-	cache := cache.NewFileCache(cfg, repo)
-	bot := handlers.NewBot(cfg, repo, cache)
+	bot := handlers.NewBot(cfg, repo)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
