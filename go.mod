@@ -31,4 +31,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/bwmarrin/discordgo => github.com/sonroyaalmerol/discordgo v0.29.1-0.20260518184753-cfae9ac4bee6
+replace github.com/bwmarrin/discordgo => github.com/sonroyaalmerol/discordgo v0.29.1-0.20260518192121-32e5b518d9f4
