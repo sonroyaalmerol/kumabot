@@ -12,12 +12,15 @@ var benchmarkOpusPacket = make([]byte, 120) // typical compressed opus frame
 // warmupPool fills the pool so subsequent Push/Pop cycles hit zero allocations.
 // Ring buffer usable capacity is maxSize-1, so we use n-1 items.
 func warmupPool(ob *opusBuffer, n int) {
+	timer := time.NewTimer(popPollInterval)
+	defer timer.Stop()
+
 	cap := n - 1 // ring buffer reserves 1 slot
 	for i := range cap {
 		ob.Push(benchmarkOpusPacket, int64(i), time.Now())
 	}
 	for range cap {
-		pkt, _ := ob.Pop(context.Background())
+		pkt, _ := ob.Pop(context.Background(), timer)
 		ob.Release(pkt.data)
 	}
 }
@@ -28,13 +31,15 @@ func BenchmarkOpusBufferPushPop(b *testing.B) {
 	ob := newOpusBuffer(1024)
 	warmupPool(ob, 1024)
 	ts := time.Now()
+	timer := time.NewTimer(popPollInterval)
+	defer timer.Stop()
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
 		ob.Push(benchmarkOpusPacket, int64(i), ts)
-		pkt, ok := ob.Pop(context.Background())
+		pkt, ok := ob.Pop(context.Background(), timer)
 		if !ok {
 			b.Fatal("Pop failed")
 		}

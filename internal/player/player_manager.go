@@ -9,8 +9,8 @@ import (
 )
 
 type PlayerManager struct {
-	mu      sync.Mutex
 	Players map[string]*Player
+	mu      sync.Mutex
 }
 
 func NewPlayerManager() *PlayerManager {

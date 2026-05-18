@@ -14,9 +14,9 @@ import (
 )
 
 type ResolveEvent struct {
-	Song SongMetadata
-	Info string
 	Err  error
+	Info string
+	Song SongMetadata
 }
 
 // ProgressFunc is called to update the user on resolution progress.
@@ -123,9 +123,9 @@ func ResolveQueryStream(
 					}
 					// resolve each entry incrementally
 					for idx, e := range infos {
-					if idx%5 == 0 {
-						progress.update(fmt.Sprintf("Resolving track %d/%d...", idx+1, len(infos)))
-					}
+						if idx%5 == 0 {
+							progress.update(fmt.Sprintf("Resolving track %d/%d...", idx+1, len(infos)))
+						}
 						select {
 						case <-ctx.Done():
 							return

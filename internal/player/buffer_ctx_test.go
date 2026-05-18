@@ -8,6 +8,8 @@ import (
 
 func TestOpusBufferPopRespectsContext(t *testing.T) {
 	ob := newOpusBuffer(100)
+	timer := time.NewTimer(popPollInterval)
+	defer timer.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -16,7 +18,7 @@ func TestOpusBufferPopRespectsContext(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, ok := ob.Pop(ctx)
+	_, ok := ob.Pop(ctx, timer)
 	elapsed := time.Since(start)
 
 	if ok {
@@ -29,6 +31,8 @@ func TestOpusBufferPopRespectsContext(t *testing.T) {
 
 func TestOpusBufferPopReturnsAfterEOS(t *testing.T) {
 	ob := newOpusBuffer(100)
+	timer := time.NewTimer(popPollInterval)
+	defer timer.Stop()
 
 	// Push one packet
 	data := []byte{1, 2, 3}
@@ -37,7 +41,7 @@ func TestOpusBufferPopReturnsAfterEOS(t *testing.T) {
 	}
 
 	// Pop it
-	pkt, ok := ob.Pop(context.Background())
+	pkt, ok := ob.Pop(context.Background(), timer)
 	if !ok {
 		t.Fatal("expected Pop to succeed")
 	}
@@ -52,7 +56,7 @@ func TestOpusBufferPopReturnsAfterEOS(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, ok = ob.Pop(context.Background())
+	_, ok = ob.Pop(context.Background(), timer)
 	elapsed := time.Since(start)
 
 	if ok {
@@ -65,6 +69,8 @@ func TestOpusBufferPopReturnsAfterEOS(t *testing.T) {
 
 func TestOpusBufferPopReturnsAfterClose(t *testing.T) {
 	ob := newOpusBuffer(100)
+	timer := time.NewTimer(popPollInterval)
+	defer timer.Stop()
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -72,7 +78,7 @@ func TestOpusBufferPopReturnsAfterClose(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, ok := ob.Pop(context.Background())
+	_, ok := ob.Pop(context.Background(), timer)
 	elapsed := time.Since(start)
 
 	if ok {

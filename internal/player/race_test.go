@@ -308,11 +308,13 @@ func TestConcurrentSafeDisconnect(t *testing.T) {
 func TestBufferCloseDuringPop(t *testing.T) {
 	buf := newOpusBuffer(100)
 	ctx := t.Context()
+	timer := time.NewTimer(popPollInterval)
+	defer timer.Stop()
 
 	popDone := make(chan struct{})
 	go func() {
 		defer close(popDone)
-		_, _ = buf.Pop(ctx)
+		_, _ = buf.Pop(ctx, timer)
 	}()
 
 	time.Sleep(50 * time.Millisecond)

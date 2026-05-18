@@ -21,47 +21,39 @@ type PCMFrame struct {
 }
 
 type PCMStreamer struct {
-	fc           *astiav.FormatContext
-	audioStream  *astiav.Stream
-	decCtx       *astiav.CodecContext
-	swr          *astiav.SoftwareResampleContext
-	srcFrame     *astiav.Frame
-	dstFrame     *astiav.Frame
-	cancel       context.CancelFunc
-	pr           *io.PipeReader
-	pw           *io.PipeWriter
-	writerClosed bool
-	runOnce      sync.Once
-
-	// target
-	targetRate    int
-	targetLayout  astiav.ChannelLayout
-	targetFormat  astiav.SampleFormat
-	targetNbChans int
-
-	timeBase     astiav.Rational
-	initedSWR    bool // after first successful ConvertFrame
-	inRate       int
-	inLayout     astiav.ChannelLayout
-	outPTS48Next int64
-	gotFirstPTS  bool
-	firstPTS48   int64
-	inFmt        astiav.SampleFormat
-
-	fifo          []byte
-	interleaveBuf []byte // reused for planar→interleaved conversion
-
-	inputURL string
-	isHLS    bool
-
-	reconnectCh chan ReconnectSignal
-
-	resumeAt48        int64 // if >=0, trim decoded audio until this sample index (48k)
-	lastProducedPTS48 int64
-	producedMu        sync.Mutex
-
-	totalSamplesProduced int64 // Total samples we've actually written
-	streamStartPTS48     int64 // PTS where stream actually starts (after skip)
+	cancel               context.CancelFunc
+	audioStream          *astiav.Stream
+	decCtx               *astiav.CodecContext
+	swr                  *astiav.SoftwareResampleContext
+	srcFrame             *astiav.Frame
+	dstFrame             *astiav.Frame
+	inLayout             astiav.ChannelLayout
+	pr                   *io.PipeReader
+	pw                   *io.PipeWriter
+	reconnectCh          chan ReconnectSignal
+	fc                   *astiav.FormatContext
+	targetLayout         astiav.ChannelLayout
+	inputURL             string
+	interleaveBuf        []byte
+	fifo                 []byte
+	inRate               int
+	streamStartPTS48     int64
+	resumeAt48           int64
+	totalSamplesProduced int64
+	outPTS48Next         int64
+	firstPTS48           int64
+	targetNbChans        int
+	targetRate           int
+	lastProducedPTS48    int64
+	runOnce              sync.Once
+	producedMu           sync.Mutex
+	timeBase             astiav.Rational
+	inFmt                astiav.SampleFormat
+	targetFormat         astiav.SampleFormat
+	writerClosed         bool
+	isHLS                bool
+	gotFirstPTS          bool
+	initedSWR            bool
 }
 
 type ReconnectSignal struct {

@@ -27,30 +27,29 @@ type YTDLPEntry struct {
 	Id               string                 `json:"id"`
 	Title            string                 `json:"title"`
 	Uploader         string                 `json:"uploader"`
-	Duration         float64                `json:"duration"`
-	IsLive           bool                   `json:"is_live"`
 	Description      string                 `json:"description"`
 	WebpageUrl       string                 `json:"webpage_url"`
+	Url              string                 `json:"url"`
 	Thumbnails       []YTDLPThumbnail       `json:"thumbnails"`
 	Formats          []YTDLPFormat          `json:"formats"`
 	RequestedFormats []YTDLPRequestedFormat `json:"requested_formats"`
-	Url              string                 `json:"url"`
+	Duration         float64                `json:"duration"`
+	IsLive           bool                   `json:"is_live"`
 }
 
 type YTDLPInfo struct {
 	Id               string                 `json:"id"`
 	Title            string                 `json:"title"`
 	Uploader         string                 `json:"uploader"`
-	Duration         float64                `json:"duration"`
-	IsLive           bool                   `json:"is_live"`
 	Description      string                 `json:"description"`
 	WebpageUrl       string                 `json:"webpage_url"`
+	Url              string                 `json:"url"`
 	Thumbnails       []YTDLPThumbnail       `json:"thumbnails"`
 	Formats          []YTDLPFormat          `json:"formats"`
 	RequestedFormats []YTDLPRequestedFormat `json:"requested_formats"`
-	Url              string                 `json:"url"`
-
-	Entries []YTDLPEntry `json:"entries"`
+	Entries          []YTDLPEntry           `json:"entries"`
+	Duration         float64                `json:"duration"`
+	IsLive           bool                   `json:"is_live"`
 }
 
 type MediaURL struct {

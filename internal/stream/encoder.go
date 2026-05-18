@@ -15,8 +15,8 @@ type OpusPacketHandler func(pkt []byte) error
 var encoderPool typedEncoderPool
 
 type typedEncoderPool struct {
-	mu    sync.Mutex
 	items []*Encoder
+	mu    sync.Mutex
 }
 
 func (p *typedEncoderPool) Get() (*Encoder, error) {

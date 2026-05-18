@@ -10,9 +10,9 @@ const popPollInterval = 20 * time.Millisecond
 
 // typedPool is a generic, type-safe pool that avoids sync.Pool's interface boxing.
 type typedPool[T any] struct {
-	mu    sync.Mutex
-	items []T
 	newFn func() T
+	items []T
+	mu    sync.Mutex
 }
 
 func (p *typedPool[T]) Get() T {
@@ -34,20 +34,20 @@ func (p *typedPool[T]) Put(v T) {
 }
 
 type opusBuffer struct {
-	mu       sync.Mutex
 	packets  []bufferedPacket
+	pool     typedPool[[]byte]
+	mu       sync.Mutex
 	maxSize  int
 	readPos  int
 	writePos int
 	closed   bool
 	eos      bool
-	pool     typedPool[[]byte]
 }
 
 type bufferedPacket struct {
+	targetTS time.Time
 	data     []byte
 	pts48    int64
-	targetTS time.Time
 }
 
 func newOpusBuffer(maxPackets int) *opusBuffer {
@@ -55,7 +55,7 @@ func newOpusBuffer(maxPackets int) *opusBuffer {
 		packets: make([]bufferedPacket, maxPackets),
 		maxSize: maxPackets,
 		pool: typedPool[[]byte]{
-			newFn: func() []byte { return make([]byte, 0, 200) },
+			newFn: func() []byte { return make([]byte, 0, 512) },
 		},
 	}
 }
@@ -92,7 +92,7 @@ func (ob *opusBuffer) Push(data []byte, pts48 int64, targetTS time.Time) bool {
 	return true
 }
 
-func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
+func (ob *opusBuffer) Pop(ctx context.Context, timer *time.Timer) (bufferedPacket, bool) {
 	for {
 		ob.mu.Lock()
 		if ob.closed {
@@ -115,7 +115,7 @@ func (ob *opusBuffer) Pop(ctx context.Context) (bufferedPacket, bool) {
 		}
 		ob.mu.Unlock()
 
-		timer := time.NewTimer(popPollInterval)
+		timer.Reset(popPollInterval)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {

@@ -33,48 +33,41 @@ type pcmStreamer interface {
 }
 
 type Player struct {
-	cfg      *config.Config
-	repo     *repository.Repo
-	cache    *cache.FileCache
-	guildID  string
-	onRemove func() // called when player is fully disconnected
-
-	opCtx    context.Context
-	opCancel context.CancelFunc // cancels in-flight yt-dlp/radio operations
-
-	mu            sync.Mutex
-	Conn          *discordgo.VoiceConnection
-	Session       *discordgo.Session
-	ConnChannelID string
-	TextChannelID string
-
-	status          atomic.Int32 // PlayerStatus (int32 cast)
-	SongQueue       []SongMetadata
-	Qpos            int
-	NowPlaying      *SongMetadata
-	positionSec     atomic.Int32
-	DefaultVol      int
-	volume          atomic.Int32 // current playback volume 0-150
-	loopSong        atomic.Bool
-	loopQueue       atomic.Bool
-	shuffleMode     atomic.Bool
-	DisconnectTimer *time.Timer
-	LastURL         string
-
-	// Radio feature state
-	radioMode        atomic.Bool         // Whether radio is enabled
-	RadioQueuedIndex int                 // Position of radio-suggested song in queue, -1 if none
-	RadioHistory     []radioHistoryEntry // History of songs played by radio to avoid repeats
-	radioSearchDone  chan struct{}       // closed when background radio search completes
-
-	requestedSeek    *int
-	lastResolvedURL  string
-	lastVideoID      string
 	urlResolvedAt    time.Time
-	searchQueue      atomic.Int32
+	opCtx            context.Context
+	curPlay          *playSession
+	cfg              *config.Config
+	onRemove         func()
+	cache            *cache.FileCache
+	opCancel         context.CancelFunc
+	requestedSeek    *int
+	Conn             *discordgo.VoiceConnection
+	Session          *discordgo.Session
+	NowPlaying       *SongMetadata
+	DisconnectTimer  *time.Timer
+	radioSearchDone  chan struct{}
+	repo             *repository.Repo
 	lastEmbedMessage *discordgo.Message
-
-	curPlay *playSession
+	LastURL          string
+	guildID          string
+	lastVideoID      string
+	lastResolvedURL  string
+	TextChannelID    string
+	ConnChannelID    string
+	SongQueue        []SongMetadata
+	RadioHistory     []radioHistoryEntry
+	Qpos             int
+	DefaultVol       int
+	RadioQueuedIndex int
+	mu               sync.Mutex
+	positionSec      atomic.Int32
+	radioMode        atomic.Bool
+	shuffleMode      atomic.Bool
+	loopQueue        atomic.Bool
+	loopSong         atomic.Bool
+	searchQueue      atomic.Int32
+	volume           atomic.Int32
+	status           atomic.Int32
 }
 
 type playSession struct {
@@ -418,9 +411,9 @@ func (p *Player) MaybeAutoplayAfterAdd(ctx context.Context, s *discordgo.Session
 }
 
 type framedPCM struct {
+	data      []byte
 	pts48     int64
 	nbSamples int32
-	data      []byte // 960*2*2 bytes
 }
 
 func readPCMFrame(r *bufio.Reader, buf []byte) (framedPCM, error) {
@@ -1160,6 +1153,8 @@ func (p *Player) sendLoop(
 	}()
 
 	// Wait for voice ready
+	readyTimer := time.NewTimer(100 * time.Millisecond)
+	defer readyTimer.Stop()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if vc == nil {
@@ -1174,10 +1169,17 @@ func (p *Player) sendLoop(
 		if vc.OpusSend != nil {
 			break
 		}
+		readyTimer.Reset(100 * time.Millisecond)
 		select {
 		case <-sess.ctx.Done():
+			if !readyTimer.Stop() {
+				select {
+				case <-readyTimer.C:
+				default:
+				}
+			}
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-readyTimer.C:
 		}
 	}
 	if vc == nil || vc.OpusSend == nil {
@@ -1208,6 +1210,13 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 	framePCM := make([]byte, sess.enc.FrameBytes())
 	readBuf := make([]byte, 0, sess.enc.FrameBytes())
 	var outPkt []byte // reused across frames to avoid per-frame heap allocation
+
+	// Reusable timer for buffer-full backoff
+	pushBackoff := time.NewTimer(0)
+	if !pushBackoff.Stop() {
+		<-pushBackoff.C
+	}
+	defer pushBackoff.Stop()
 
 	var wall0 time.Time
 	var media0 int64
@@ -1275,10 +1284,17 @@ func (p *Player) producePackets(sess *playSession, startPos int) {
 				slog.Warn("buffer full, dropping packet", "guildID", p.guildID)
 				break
 			}
+			pushBackoff.Reset(10 * time.Millisecond)
 			select {
 			case <-sess.ctx.Done():
+				if !pushBackoff.Stop() {
+					select {
+					case <-pushBackoff.C:
+					default:
+					}
+				}
 				return
-			case <-time.After(10 * time.Millisecond):
+			case <-pushBackoff.C:
 			}
 		}
 	}
@@ -1309,10 +1325,17 @@ func (p *Player) consumePackets(
 
 	// Initial buffer wait
 	for sess.buf.BufferedCount() < minBufferPackets {
+		waitTimer.Reset(50 * time.Millisecond)
 		select {
 		case <-sess.ctx.Done():
+			if !waitTimer.Stop() {
+				select {
+				case <-waitTimer.C:
+				default:
+				}
+			}
 			return
-		case <-time.After(50 * time.Millisecond):
+		case <-waitTimer.C:
 		}
 	}
 
@@ -1330,7 +1353,7 @@ func (p *Player) consumePackets(
 	packetCount := 0
 
 	for {
-		pkt, ok := sess.buf.Pop(sess.ctx)
+		pkt, ok := sess.buf.Pop(sess.ctx, waitTimer)
 		if !ok {
 			break
 		}
