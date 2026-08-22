@@ -32,7 +32,7 @@ func main() {
 
 	slog.Info("installing dependencies", "ytdlp", true)
 
-	ytdlp.MustInstall(ctx, nil)
+	ytdlp.MustInstall(ctx, &ytdlp.InstallOptions{AllowVersionMismatch: true})
 
 	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)

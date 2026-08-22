@@ -51,6 +51,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && curl -fsSL https://bun.com/install | bash \
   && mv /root/.bun/bin/bun /usr/local/bin/bun \
   && rm -rf /root/.bun \
+  && case "$(dpkg --print-architecture)" in \
+  arm64) YTDLP_ASSET=yt-dlp_linux_aarch64 ;; \
+  armhf) YTDLP_ASSET=yt-dlp_linux_armv7l ;; \
+  *) YTDLP_ASSET=yt-dlp_linux ;; \
+  esac \
+  && curl -fsSL -o /usr/local/bin/yt-dlp \
+  "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$YTDLP_ASSET" \
+  && chmod 0755 /usr/local/bin/yt-dlp \
   && apt-get purge -y curl unzip \
   && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
