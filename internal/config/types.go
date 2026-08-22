@@ -12,4 +12,5 @@ type Config struct {
 	RegisterCommandsOnBot  bool
 	YouTubePOToken         string
 	YouTubeCookiesPath     string
+	HTTPUserAgent          string
 }

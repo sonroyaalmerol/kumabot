@@ -54,6 +54,7 @@ type PCMStreamer struct {
 	isHLS                bool
 	gotFirstPTS          bool
 	initedSWR            bool
+	userAgent            string
 }
 
 type ReconnectSignal struct {
@@ -76,6 +77,7 @@ func StartPCMStream(
 	ctx context.Context,
 	inputURL string,
 	seek, to *int,
+	userAgent string,
 ) (*PCMStreamer, error) {
 	if inputURL == "" {
 		return nil, fmt.Errorf("StartPCMStream: empty input URL")
@@ -93,6 +95,9 @@ func StartPCMStream(
 
 	dict := astiav.NewDictionary()
 	defer dict.Free()
+
+	_ = dict.Set("user_agent", userAgent, 0)
+	_ = dict.Set("icy", "0", 0)
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
@@ -201,6 +206,7 @@ func StartPCMStream(
 		fifo:          make([]byte, 0, 3840*8),
 		inputURL:      inputURL,
 		isHLS:         isHLS,
+		userAgent:     userAgent,
 		resumeAt48:    -1,
 		reconnectCh:   make(chan ReconnectSignal, 1),
 	}
@@ -391,19 +397,19 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	pcmDebugf("reopenAndSeek: lastProduced=%d calculated=%d using=%d",
 		s.lastProducedPTS48, s.streamStartPTS48+s.totalSamplesProduced, targetPTS)
 
-	// Close existing contexts
 	if s.fc != nil {
 		s.fc.CloseInput()
 		s.fc.Free()
 		s.fc = nil
 	}
 
-	// Alloc fresh format context
 	fc := astiav.AllocFormatContext()
 	if fc == nil {
 		return errors.New("alloc format context (reopen)")
 	}
 	dict := astiav.NewDictionary()
+	_ = dict.Set("user_agent", s.userAgent, 0)
+	_ = dict.Set("icy", "0", 0)
 	var inFmt *astiav.InputFormat
 	if s.isHLS {
 		inFmt = astiav.FindInputFormat("hls")
