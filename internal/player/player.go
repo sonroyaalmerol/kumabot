@@ -526,7 +526,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 	// Create playback-scoped context and resources
 	playCtx, playCancel := context.WithCancel(ctx)
-	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to, p.cfg.HTTPUserAgent)
+	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to, p.cfg.HTTPUserAgent, p.cfg.YouTubeCookiesPath)
 	if err != nil {
 		playCancel()
 		return err

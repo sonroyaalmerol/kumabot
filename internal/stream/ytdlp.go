@@ -180,12 +180,12 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 	}
 
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-		extractorArgs := "youtube:player-client=default,mweb"
+		extractorArgs := "youtube:player-client=mweb"
 		if cfg.YouTubePOToken != "" {
 			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}
 		cmd = cmd.ExtractorArgs(extractorArgs)
-		ytdlpDebugf("using YouTube extractor args: player-client=default,mweb")
+		ytdlpDebugf("using YouTube extractor args: player-client=mweb")
 	}
 
 	ytdlpDebugf("running yt-dlp for URL: %s", url)
@@ -295,7 +295,7 @@ func YtdlpGetRelated(ctx context.Context, cfg *config.Config, videoID string, li
 	}
 
 	if cfg.YouTubePOToken != "" {
-		cmd = cmd.ExtractorArgs("youtube:player-client=default,mweb;po_token=" + cfg.YouTubePOToken)
+		cmd = cmd.ExtractorArgs("youtube:player-client=mweb;po_token=" + cfg.YouTubePOToken)
 	}
 
 	ytdlpDebugf("running yt-dlp for related: %s (limit=%d)", url, limit)

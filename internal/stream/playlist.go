@@ -21,7 +21,7 @@ func YtdlpPlaylist(ctx context.Context, cfg *config.Config, url string) ([]*YTDL
 
 	// Add YouTube-specific extractor args
 	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-		extractorArgs := "youtube:player-client=default,mweb"
+		extractorArgs := "youtube:player-client=mweb"
 		if cfg.YouTubePOToken != "" {
 			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}

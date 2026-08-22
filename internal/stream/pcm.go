@@ -55,6 +55,8 @@ type PCMStreamer struct {
 	gotFirstPTS          bool
 	initedSWR            bool
 	userAgent            string
+	cookiesPath          string
+	httpHeaders          string
 }
 
 type ReconnectSignal struct {
@@ -78,6 +80,7 @@ func StartPCMStream(
 	inputURL string,
 	seek, to *int,
 	userAgent string,
+	cookiesPath string,
 ) (*PCMStreamer, error) {
 	if inputURL == "" {
 		return nil, fmt.Errorf("StartPCMStream: empty input URL")
@@ -99,6 +102,11 @@ func StartPCMStream(
 	_ = dict.Set("user_agent", userAgent, 0)
 	_ = dict.Set("icy", "0", 0)
 	_ = dict.Set("multiple_requests", "1", 0)
+
+	httpHeaders := buildHTTPHeaders(cookiesPath, inputURL)
+	if httpHeaders != "" {
+		_ = dict.Set("headers", httpHeaders, 0)
+	}
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
@@ -210,6 +218,8 @@ func StartPCMStream(
 		userAgent:     userAgent,
 		resumeAt48:    -1,
 		reconnectCh:   make(chan ReconnectSignal, 1),
+		cookiesPath:   cookiesPath,
+		httpHeaders:   httpHeaders,
 	}
 
 	go ps.run(ctx2, seek, to)
@@ -412,6 +422,9 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	_ = dict.Set("user_agent", s.userAgent, 0)
 	_ = dict.Set("icy", "0", 0)
 	_ = dict.Set("multiple_requests", "1", 0)
+	if s.httpHeaders != "" {
+		_ = dict.Set("headers", s.httpHeaders, 0)
+	}
 	var inFmt *astiav.InputFormat
 	if s.isHLS {
 		inFmt = astiav.FindInputFormat("hls")
@@ -841,4 +854,55 @@ func writePCMFrame(w io.Writer, f PCMFrame) error {
 	}
 	_, err := w.Write(f.Data)
 	return err
+}
+
+// isYouTubeURL checks for YouTube/Google Video CDN URLs requiring auth headers.
+func isYouTubeURL(u string) bool {
+	return strings.Contains(u, "googlevideo.com") ||
+		strings.Contains(u, "youtube.com")
+}
+
+// buildHTTPHeaders builds the FFmpeg headers dict for YouTube media URLs (Referer + cookies).
+func buildHTTPHeaders(cookiesPath, inputURL string) string {
+	if !isYouTubeURL(inputURL) {
+		return ""
+	}
+
+	var parts []string
+	parts = append(parts, "Referer: https://www.youtube.com/")
+
+	if cookiesPath != "" {
+		if cookie, err := readCookieHeader(cookiesPath); err == nil && cookie != "" {
+			parts = append(parts, cookie)
+		} else if err != nil {
+			pcmDebugf("failed to read cookies: %v", err)
+		}
+	}
+
+	return strings.Join(parts, "\r\n") + "\r\n"
+}
+
+// readCookieHeader parses a Netscape cookies.txt into a Cookie header value.
+func readCookieHeader(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read cookies file: %w", err)
+	}
+
+	var pairs []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 7 {
+			continue
+		}
+		pairs = append(pairs, fields[5]+"="+fields[6])
+	}
+	if len(pairs) == 0 {
+		return "", nil
+	}
+	return "Cookie: " + strings.Join(pairs, "; "), nil
 }
