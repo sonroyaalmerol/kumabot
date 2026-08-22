@@ -19,8 +19,8 @@ func YtdlpPlaylist(ctx context.Context, cfg *config.Config, url string) ([]*YTDL
 		ytdlpDebugf("playlist: using cookies from file")
 	}
 
-	// Add YouTube-specific extractor args
-	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
+	isYT := strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") || strings.HasPrefix(url, "ytsearch")
+	if isYT {
 		extractorArgs := "youtube:player-client=mweb"
 		if cfg.YouTubePOToken != "" {
 			extractorArgs += ";po_token=" + cfg.YouTubePOToken
