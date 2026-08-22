@@ -19,6 +19,7 @@ type SongMetadata struct {
 	Title             string
 	Artist            string
 	Thumbnail         string
+	UserAgent         string
 	RequestedBy       string
 	AddedInChan       string
 	Length            int

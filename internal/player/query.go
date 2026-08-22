@@ -278,6 +278,7 @@ func ytInfoToMetadata(info *stream.YTDLPInfo, qp *QueuedPlaylist, split bool) []
 		Playlist:  qp,
 		IsLive:    info.IsLive,
 		Thumbnail: thumb,
+		UserAgent: info.UserAgent,
 		Source:    SourceYouTube,
 	}
 

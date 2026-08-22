@@ -50,6 +50,7 @@ type Player struct {
 	guildID          string
 	lastVideoID      string
 	lastResolvedURL  string
+	lastResolvedUA   string
 	TextChannelID    string
 	ConnChannelID    string
 	SongQueue        []SongMetadata
@@ -168,6 +169,7 @@ func (p *Player) setIdleStateLocked() bool {
 
 func (p *Player) invalidateURLCacheLocked() {
 	p.lastResolvedURL = ""
+	p.lastResolvedUA = ""
 	p.lastVideoID = ""
 	p.urlResolvedAt = time.Time{}
 }
@@ -488,6 +490,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 	// Resolve input URL without holding the lock
 	inputURL := ""
+	userAgent := cur.UserAgent
 	if cur.Source == SourceHLS {
 		inputURL = cur.URL
 	} else {
@@ -501,6 +504,7 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 				time.Since(p.urlResolvedAt) < 5*time.Hour
 			if canReuse {
 				inputURL = p.lastResolvedURL
+				userAgent = p.lastResolvedUA
 			}
 			p.mu.Unlock()
 
@@ -514,9 +518,11 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 					return errors.New("no usable media URL")
 				}
 				inputURL = mu.URL
+				userAgent = mu.UserAgent
 
 				p.mu.Lock()
 				p.lastResolvedURL = inputURL
+				p.lastResolvedUA = userAgent
 				p.lastVideoID = cur.VideoID
 				p.urlResolvedAt = time.Now()
 				p.mu.Unlock()
@@ -526,7 +532,10 @@ func (p *Player) Play(ctx context.Context, s *discordgo.Session, i *discordgo.In
 
 	// Create playback-scoped context and resources
 	playCtx, playCancel := context.WithCancel(ctx)
-	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to, p.cfg.HTTPUserAgent, p.cfg.YouTubeCookiesPath)
+	if userAgent == "" {
+		userAgent = p.cfg.HTTPUserAgent
+	}
+	pcm, err := stream.StartPCMStream(playCtx, inputURL, seek, to, userAgent, p.cfg.YouTubeCookiesPath)
 	if err != nil {
 		playCancel()
 		return err

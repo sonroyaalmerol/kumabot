@@ -11,12 +11,16 @@ import (
 	"github.com/sonroyaalmerol/kumabot/internal/config"
 )
 
+const youtubePlayerClients = "default,-android_vr"
+
 type YTDLPRequestedFormat struct {
-	Url string `json:"url"`
+	Url       string `json:"url"`
+	UserAgent string `json:"user_agent"`
 }
 
 type YTDLPFormat struct {
-	Url string `json:"url"`
+	Url       string `json:"url"`
+	UserAgent string `json:"user_agent"`
 }
 
 type YTDLPThumbnail struct {
@@ -30,6 +34,7 @@ type YTDLPEntry struct {
 	Description      string                 `json:"description"`
 	WebpageUrl       string                 `json:"webpage_url"`
 	Url              string                 `json:"url"`
+	UserAgent        string                 `json:"user_agent"`
 	Thumbnails       []YTDLPThumbnail       `json:"thumbnails"`
 	Formats          []YTDLPFormat          `json:"formats"`
 	RequestedFormats []YTDLPRequestedFormat `json:"requested_formats"`
@@ -44,6 +49,7 @@ type YTDLPInfo struct {
 	Description      string                 `json:"description"`
 	WebpageUrl       string                 `json:"webpage_url"`
 	Url              string                 `json:"url"`
+	UserAgent        string                 `json:"user_agent"`
 	Thumbnails       []YTDLPThumbnail       `json:"thumbnails"`
 	Formats          []YTDLPFormat          `json:"formats"`
 	RequestedFormats []YTDLPRequestedFormat `json:"requested_formats"`
@@ -53,8 +59,9 @@ type YTDLPInfo struct {
 }
 
 type MediaURL struct {
-	Kind string // "direct" or "hls"
-	URL  string
+	Kind      string
+	URL       string
+	UserAgent string
 }
 
 func PickMediaURL(info *YTDLPInfo) MediaURL {
@@ -63,18 +70,18 @@ func PickMediaURL(info *YTDLPInfo) MediaURL {
 		u := rf.Url
 		if strings.HasPrefix(u, "http") && !isManifestURL(u) && isLikelyMediaURL(u) {
 			ytdlpDebugf("PickMediaURL: DIRECT requested %s", u)
-			return MediaURL{Kind: "direct", URL: u}
+			return MediaURL{Kind: "direct", URL: u, UserAgent: pickUA(rf.UserAgent, info.UserAgent)}
 		}
 	}
 	if strings.HasPrefix(info.Url, "http") && !isManifestURL(info.Url) && isLikelyMediaURL(info.Url) {
 		ytdlpDebugf("PickMediaURL: DIRECT top-level %s", info.Url)
-		return MediaURL{Kind: "direct", URL: info.Url}
+		return MediaURL{Kind: "direct", URL: info.Url, UserAgent: info.UserAgent}
 	}
 	for _, f := range info.Formats {
 		u := f.Url
 		if strings.HasPrefix(u, "http") && !isManifestURL(u) && isLikelyMediaURL(u) {
 			ytdlpDebugf("PickMediaURL: DIRECT formats %s", u)
-			return MediaURL{Kind: "direct", URL: u}
+			return MediaURL{Kind: "direct", URL: u, UserAgent: pickUA(f.UserAgent, info.UserAgent)}
 		}
 	}
 	// 2) HLS fallback (requested -> top-level -> formats)
@@ -82,22 +89,29 @@ func PickMediaURL(info *YTDLPInfo) MediaURL {
 		u := rf.Url
 		if strings.HasPrefix(u, "http") && isManifestURL(u) {
 			ytdlpDebugf("PickMediaURL: HLS requested %s", u)
-			return MediaURL{Kind: "hls", URL: u}
+			return MediaURL{Kind: "hls", URL: u, UserAgent: pickUA(rf.UserAgent, info.UserAgent)}
 		}
 	}
 	if strings.HasPrefix(info.Url, "http") && isManifestURL(info.Url) {
 		ytdlpDebugf("PickMediaURL: HLS top-level %s", info.Url)
-		return MediaURL{Kind: "hls", URL: info.Url}
+		return MediaURL{Kind: "hls", URL: info.Url, UserAgent: info.UserAgent}
 	}
 	for _, f := range info.Formats {
 		u := f.Url
 		if strings.HasPrefix(u, "http") && isManifestURL(u) {
 			ytdlpDebugf("PickMediaURL: HLS formats %s", u)
-			return MediaURL{Kind: "hls", URL: u}
+			return MediaURL{Kind: "hls", URL: u, UserAgent: pickUA(f.UserAgent, info.UserAgent)}
 		}
 	}
 	ytdlpDebugf("PickMediaURL: none")
 	return MediaURL{}
+}
+
+func pickUA(formatUA, infoUA string) string {
+	if formatUA != "" {
+		return formatUA
+	}
+	return infoUA
 }
 
 // helpers to safely read pointer fields with defaults
@@ -142,7 +156,7 @@ func mapFormats(fs []*ytdlp.ExtractedFormat) []YTDLPFormat {
 		if f == nil {
 			continue
 		}
-		out = append(out, YTDLPFormat{Url: f.URL})
+		out = append(out, YTDLPFormat{Url: f.URL, UserAgent: f.HTTPHeaders["User-Agent"]})
 	}
 	return out
 }
@@ -155,7 +169,7 @@ func mapReqFormats(fs []*ytdlp.ExtractedFormat) []YTDLPRequestedFormat {
 		if f == nil {
 			continue
 		}
-		out = append(out, YTDLPRequestedFormat{Url: f.URL})
+		out = append(out, YTDLPRequestedFormat{Url: f.URL, UserAgent: f.HTTPHeaders["User-Agent"]})
 	}
 	return out
 }
@@ -181,12 +195,12 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 
 	isYT := strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") || strings.HasPrefix(url, "ytsearch")
 	if isYT {
-		extractorArgs := "youtube:player-client=mweb"
+		extractorArgs := "youtube:player-client=" + youtubePlayerClients
 		if cfg.YouTubePOToken != "" {
 			extractorArgs += ";po_token=" + cfg.YouTubePOToken
 		}
 		cmd = cmd.ExtractorArgs(extractorArgs)
-		ytdlpDebugf("using YouTube extractor args: player-client=mweb")
+		ytdlpDebugf("using YouTube extractor args: %s", extractorArgs)
 	}
 
 	ytdlpDebugf("running yt-dlp for URL: %s", url)
@@ -215,6 +229,7 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 			Description:      s(e.Description),
 			WebpageUrl:       s(e.WebpageURL),
 			Url:              s(e.URL),
+			UserAgent:        e.HTTPHeaders["User-Agent"],
 			Thumbnails:       mapThumbs(e.Thumbnails),
 			Formats:          mapFormats(e.Formats),
 			RequestedFormats: mapReqFormats(e.RequestedFormats),
@@ -230,6 +245,7 @@ func YtdlpGetInfo(ctx context.Context, cfg *config.Config, url string) (*YTDLPIn
 		out.Description = s(e.Description)
 		out.WebpageUrl = s(e.WebpageURL)
 		out.Url = s(e.URL)
+		out.UserAgent = e.HTTPHeaders["User-Agent"]
 		out.Thumbnails = mapThumbs(e.Thumbnails)
 		out.Formats = mapFormats(e.Formats)
 		out.RequestedFormats = mapReqFormats(e.RequestedFormats)
@@ -295,7 +311,7 @@ func YtdlpGetRelated(ctx context.Context, cfg *config.Config, videoID string, li
 		cmd = cmd.Cookies(cfg.YouTubeCookiesPath)
 	}
 
-	extractorArgs := "youtube:player-client=mweb"
+	extractorArgs := "youtube:player-client=" + youtubePlayerClients
 	if cfg.YouTubePOToken != "" {
 		extractorArgs += ";po_token=" + cfg.YouTubePOToken
 	}
