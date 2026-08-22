@@ -98,6 +98,7 @@ func StartPCMStream(
 
 	_ = dict.Set("user_agent", userAgent, 0)
 	_ = dict.Set("icy", "0", 0)
+	_ = dict.Set("multiple_requests", "1", 0)
 
 	var inFmt *astiav.InputFormat
 	isHLS := isManifestURL(inputURL)
@@ -410,6 +411,7 @@ func (s *PCMStreamer) reopenAndSeek() error {
 	dict := astiav.NewDictionary()
 	_ = dict.Set("user_agent", s.userAgent, 0)
 	_ = dict.Set("icy", "0", 0)
+	_ = dict.Set("multiple_requests", "1", 0)
 	var inFmt *astiav.InputFormat
 	if s.isHLS {
 		inFmt = astiav.FindInputFormat("hls")
